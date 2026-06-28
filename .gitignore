@@ -1,0 +1,35 @@
+/build
+/.gradle
+/local.properties
+/.idea
+.DS_Store
+/*.iml
+/captures
+/app/.cxx
+/app/.externalNativeBuild
+/app/build
+/app/libs
+
+# Gradle Wrapper
+!gradle-wrapper.jar
+
+# Android Studio
+.idea/
+.gradle/
+local.properties
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Logs
+*.log
+
+# Crashlytics
+*.zip
+
+# Keystore files
+*.jks
+
+# Documentation
+docs/*.bak
