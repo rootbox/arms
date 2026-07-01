@@ -24,26 +24,49 @@ interface RadioApiService {
 class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
 
     // KBS 공식 라이브 채널 API. service_url은 만료 서명(Policy/Signature)이 포함된 임시 URL이라 매번 새로 받아야 함.
-    private val liveChannelUrl = "https://cfpwwwapi.kbs.co.kr/api/v1/landing/live/channel_code/25"
+    private val kbsLiveChannelUrl = "https://cfpwwwapi.kbs.co.kr/api/v1/landing/live/channel_code/25"
     private val fallbackStreamUrl = "https://2fm-ad.gscdn.kbs.co.kr/2fm_ad_192_1.m3u8"
 
+    // SBS 공식 라이브 스트림 API. 응답 본문이 곧 서명 URL 문자열(JSON 아님)이며 매번 새로 받아야 함.
+    private val sbsLiveApiUrl = "https://apis.sbs.co.kr/play-api/1.0/livestream/powerpc/powerfm?protocol=hls&ssl=Y"
+
+    // LISTEN.moe의 K-POP 24시간 논스톱 스트림. 만료 토큰이 없는 고정 주소.
+    private val kpopStreamUrl = "https://listen.moe/kpop/stream"
+
     override fun getStations(): List<StationApiResponse> {
-        val streamUrl = fetchLiveStreamUrl() ?: fallbackStreamUrl
-        return listOf(
+        val kbsStreamUrl = fetchKbsLiveStreamUrl() ?: fallbackStreamUrl
+        val sbsStreamUrl = fetchSbsLiveStreamUrl()
+
+        // SBS는 실시간 서명 URL 발급에 실패하면 목록에서 제외 (다음 새로고침에 재시도)
+        return listOfNotNull(
             StationApiResponse(
                 id = "1",
                 name = "KBS Cool FM (89.1 MHz)",
-                streamUrl = streamUrl,
+                streamUrl = kbsStreamUrl,
                 type = "RADIO"
+            ),
+            sbsStreamUrl?.let {
+                StationApiResponse(
+                    id = "2",
+                    name = "SBS 파워FM (107.7 MHz)",
+                    streamUrl = it,
+                    type = "RADIO"
+                )
+            },
+            StationApiResponse(
+                id = "3",
+                name = "K-POP 24/7",
+                streamUrl = kpopStreamUrl,
+                type = "STREAMING"
             )
         )
     }
 
     // KBS 공식 API에서 현재 시점에 유효한 서명된 스트림 URL을 가져옴
-    private fun fetchLiveStreamUrl(): String? {
+    private fun fetchKbsLiveStreamUrl(): String? {
         return try {
             val request = Request.Builder()
-                .url(liveChannelUrl)
+                .url(kbsLiveChannelUrl)
                 .header("User-Agent", "Mozilla/5.0")
                 .build()
 
@@ -60,11 +83,52 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         }
     }
 
+    // SBS 공식 API에서 현재 시점에 유효한 서명된 스트림 URL을 가져옴 (응답 본문 자체가 URL)
+    private fun fetchSbsLiveStreamUrl(): String? {
+        return try {
+            val request = Request.Builder()
+                .url(sbsLiveApiUrl)
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string()?.trim() ?: ""
+                if (response.isSuccessful && body.startsWith("http")) body else null
+            }
+        } catch (e: IOException) {
+            null
+        }
+    }
+
     override fun getStationMetadata(stationId: String): StationApiResponse? {
         return when (stationId) {
             "1" -> fetchKbsCoolFmMetadata()
+            "2" -> fetchSbsMetadata()
+            "3" -> kpopMetadata()
             else -> null
         }
+    }
+
+    private fun fetchSbsMetadata(): StationApiResponse {
+        return StationApiResponse(
+            id = "2",
+            name = "SBS 파워FM (107.7 MHz)",
+            streamUrl = fetchSbsLiveStreamUrl() ?: "",
+            type = "RADIO",
+            currentSong = "실시간 라디오 음원 수신 중",
+            programTitle = "SBS 파워FM 실시간 방송"
+        )
+    }
+
+    private fun kpopMetadata(): StationApiResponse {
+        return StationApiResponse(
+            id = "3",
+            name = "K-POP 24/7",
+            streamUrl = kpopStreamUrl,
+            type = "STREAMING",
+            currentSong = "쉬지 않고 이어지는 K-POP 논스톱",
+            programTitle = "24시간 K-POP 스트리밍"
+        )
     }
 
     // KBS Cool FM (89.1 MHz) 실시간 공식 API 수집망
