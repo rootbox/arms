@@ -3,6 +3,7 @@ package com.arms.androidauto
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,7 +51,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        mediaPlayer.stop()
+        mediaPlayer.release()
         super.onDestroy()
     }
 }
@@ -59,7 +60,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     val coroutineScope = rememberCoroutineScope()
-    
+    val snackbarHostState = remember { SnackbarHostState() }
+
     // DB의 방송국 목록 관찰 (Flow -> State)
     val stationsState = repository.getAllStations().collectAsState(initial = emptyList())
     val stations = stationsState.value
@@ -69,6 +71,16 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     var isPlaying by remember { mutableStateOf(false) }
     var isLoadingMetadata by remember { mutableStateOf(false) }
     var isRefreshingStations by remember { mutableStateOf(false) }
+
+    // 재생 실패 시 사용자에게 알리고 버튼 상태를 원래대로 되돌림
+    LaunchedEffect(player) {
+        player.onPlaybackError = { message ->
+            isPlaying = false
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("재생 실패: $message")
+            }
+        }
+    }
 
     // 앱 시작 시 데이터 로드 및 초기화
     LaunchedEffect(Unit) {
@@ -110,7 +122,8 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 )
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Column(
             modifier = Modifier

@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.0"
 }
 
 android {
@@ -24,6 +25,16 @@ android {
             )
         }
     }
+
+    buildFeatures {
+        compose = true
+    }
+
+    packaging {
+        resources {
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
 }
 
 kotlin {
@@ -31,10 +42,14 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":core:model"))
     implementation(project(":core:radio"))
     implementation(project(":core:streaming"))
     implementation(project(":core:media"))
     implementation(project(":core:data"))
+
+    implementation(platform("androidx.compose:compose-bom:2024.09.03"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.09.03"))
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
@@ -43,12 +58,13 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("com.google.android.material:material:1.14.0")
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-session:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
-    implementation("androidx.car.app:app:1.6.0")
-    implementation("androidx.car.app:app-testing:1.6.0")
-    implementation("com.google.android.gms:play-services-car:1.3.0")
+    implementation("androidx.car.app:app:1.7.0")
+    implementation("androidx.car.app:app-testing:1.7.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

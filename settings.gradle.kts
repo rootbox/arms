@@ -9,7 +9,9 @@ pluginManagement {
             if (requested.id.id.startsWith("com.android.")) {
                 useModule("com.android.tools.build:gradle:${requested.version}")
             }
-            if (requested.id.id.startsWith("org.jetbrains.kotlin.")) {
+            if (requested.id.id == "org.jetbrains.kotlin.plugin.compose") {
+                useModule("org.jetbrains.kotlin:compose-compiler-gradle-plugin:${requested.version}")
+            } else if (requested.id.id.startsWith("org.jetbrains.kotlin.")) {
                 useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:${requested.version}")
             }
             if (requested.id.id == "kotlin-kapt") {

@@ -6,13 +6,16 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import com.arms.androidauto.core.data.StationRepository
 import com.arms.androidauto.core.model.Station
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -86,7 +89,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             page: Int,
             pageSize: Int,
             params: LibraryParams?
-        ): ListenableFuture<LibraryResult<List<MediaItem>>> {
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
             val children = mutableListOf<MediaItem>()
 
             when (parentId) {
@@ -94,7 +97,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     // 루트 메뉴: 즐겨찾기 및 모든 채널 대분류 노드 추가
                     children.add(createFolderItem(favoritesId, "즐겨찾는 채널", "★ 자주 듣는 라디오 목록"))
                     children.add(createFolderItem(allRadioId, "모든 라디오 채널", "📻 대한민국 실시간 방송 목록"))
-                    return Futures.immediateFuture(LibraryResult.ofItemList(children, params))
+                    return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.copyOf(children), params))
                 }
                 favoritesId -> {
                     // 즐겨찾기 폴더 브라우징: DB에서 즐겨찾기 상태인 방송만 필터링하여 노출
@@ -102,14 +105,14 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                         Futures.immediateFuture(stationRepository),
                         { repo ->
                             val favoriteStations = runBlocking { repo.getFavoriteStations().first() }
-                            favoriteStations.map { createPlayableItem(it) }
+                            ImmutableList.copyOf(favoriteStations.map { createPlayableItem(it) })
                         },
-                        Dispatchers.IO
+                        MoreExecutors.directExecutor()
                     )
                     return Futures.transform(
                         future,
                         { items -> LibraryResult.ofItemList(items, params) },
-                        Dispatchers.Main
+                        MoreExecutors.directExecutor()
                     )
                 }
                 allRadioId -> {
@@ -118,18 +121,18 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                         Futures.immediateFuture(stationRepository),
                         { repo ->
                             val allStations = runBlocking { repo.getAllStations().first() }
-                            allStations.map { createPlayableItem(it) }
+                            ImmutableList.copyOf(allStations.map { createPlayableItem(it) })
                         },
-                        Dispatchers.IO
+                        MoreExecutors.directExecutor()
                     )
                     return Futures.transform(
                         future,
                         { items -> LibraryResult.ofItemList(items, params) },
-                        Dispatchers.Main
+                        MoreExecutors.directExecutor()
                     )
                 }
             }
-            return Futures.immediateFuture(LibraryResult.ofItemList(emptyList(), params))
+            return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.of(), params))
         }
 
         override fun onGetItem(
@@ -165,12 +168,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             .setSubtitle(if (station.isFavorite) "★ 즐겨찾는 채널" else "일반 주파수")
             .setIsBrowsable(false)
             .setIsPlayable(true)
-            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
             .build()
 
         return MediaItem.Builder()
             .setMediaId(station.id)
-            .setMediaUri(android.net.Uri.parse(station.frequencyOrUrl))
+            .setUri(android.net.Uri.parse(station.frequencyOrUrl))
             .setMediaMetadata(metadata)
             .build()
     }

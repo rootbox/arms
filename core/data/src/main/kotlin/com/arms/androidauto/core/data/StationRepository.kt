@@ -4,8 +4,10 @@ import android.content.Context
 import com.arms.androidauto.core.model.Station
 import com.arms.androidauto.core.network.NetworkClient
 import com.arms.androidauto.core.network.StationApiResponse
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 class StationRepository(context: Context) {
     private val stationDao = AppDatabase.getDatabase(context).stationDao()
@@ -13,7 +15,7 @@ class StationRepository(context: Context) {
 
     // 초기 방송국 목록을 네트워크에서 가져와 DB에 저장 (초기 캐싱)
     suspend fun refreshStations() {
-        val apiStations = radioApiService.getStations()
+        val apiStations = withContext(Dispatchers.IO) { radioApiService.getStations() }
         val stationEntities = apiStations.map { apiResponse ->
             StationEntity(
                 id = apiResponse.id,
@@ -51,7 +53,7 @@ class StationRepository(context: Context) {
 
     // 실제 네트워크 호출로 메타데이터 조회
     suspend fun fetchMetadata(stationId: String): String {
-        val metadata = radioApiService.getStationMetadata(stationId)
+        val metadata = withContext(Dispatchers.IO) { radioApiService.getStationMetadata(stationId) }
         return if (metadata != null) {
             "현재 방송: ${metadata.programTitle ?: "정보 없음"} | 음악: ${metadata.currentSong ?: "정보 없음"}"
         } else {

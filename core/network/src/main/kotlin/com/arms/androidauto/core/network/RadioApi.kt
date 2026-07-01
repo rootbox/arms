@@ -23,16 +23,41 @@ interface RadioApiService {
 
 class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
 
+    // KBS 공식 라이브 채널 API. service_url은 만료 서명(Policy/Signature)이 포함된 임시 URL이라 매번 새로 받아야 함.
+    private val liveChannelUrl = "https://cfpwwwapi.kbs.co.kr/api/v1/landing/live/channel_code/25"
+    private val fallbackStreamUrl = "https://2fm-ad.gscdn.kbs.co.kr/2fm_ad_192_1.m3u8"
+
     override fun getStations(): List<StationApiResponse> {
-        // 89.1 MHz KBS Cool FM 단 하나만 등록 (Akamai 공식 최신 라이브 스트림 연동)
+        val streamUrl = fetchLiveStreamUrl() ?: fallbackStreamUrl
         return listOf(
             StationApiResponse(
                 id = "1",
                 name = "KBS Cool FM (89.1 MHz)",
-                streamUrl = "https://cfp2glive.akamaized.net/o_2fm/playlist.m3u8", // 아카마이 최신 고가용성 실시간 스트림 주소
+                streamUrl = streamUrl,
                 type = "RADIO"
             )
         )
+    }
+
+    // KBS 공식 API에서 현재 시점에 유효한 서명된 스트림 URL을 가져옴
+    private fun fetchLiveStreamUrl(): String? {
+        return try {
+            val request = Request.Builder()
+                .url(liveChannelUrl)
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (response.isSuccessful && body.isNotEmpty()) {
+                    """"service_url"\s*:\s*"([^"]+)"""".toRegex().find(body)?.groupValues?.get(1)
+                } else {
+                    null
+                }
+            }
+        } catch (e: IOException) {
+            null
+        }
     }
 
     override fun getStationMetadata(stationId: String): StationApiResponse? {
@@ -44,7 +69,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
 
     // KBS Cool FM (89.1 MHz) 실시간 공식 API 수집망
     private fun fetchKbsCoolFmMetadata(): StationApiResponse {
-        val streamUrl = "https://cfp2glive.akamaized.net/o_2fm/playlist.m3u8"
+        val streamUrl = fallbackStreamUrl
 
         // 사용자 환경에서 유일하게 성공적으로 DNS가 해석된 'api.kbs.co.kr' 기반의 'schedule' 정식 API 후보군 탐색
         val candidateUrls = listOf(
@@ -92,7 +117,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
 
     // 실제 KBS Cool FM 89.1 MHz 실시간 편성표 데이터베이스 (오프라인/차단 시 100% 정확도 보장)
     private fun getLocalKbsCoolFmSchedule(): StationApiResponse {
-        val streamUrl = "https://cfp2glive.akamaized.net/o_2fm/playlist.m3u8"
+        val streamUrl = fallbackStreamUrl
         val calendar = Calendar.getInstance()
         val hour = calendar.get(Calendar.HOUR_OF_DAY)
 
