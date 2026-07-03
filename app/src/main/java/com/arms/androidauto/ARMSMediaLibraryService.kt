@@ -56,7 +56,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // duration/seek 관련 정보를 감추는 래퍼를 통해 세션에 플레이어를 연결한다.
         mediaLibrarySession = MediaLibrarySession.Builder(
             this,
-            LiveRadioPlayer(player),
+            LiveRadioPlayer(player) { direction -> skipToAdjacentStation(direction) },
             LibraryCallback()
         ).build()
 
@@ -106,27 +106,87 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
         val artworkUri = nowPlaying.imageUrl?.let { url ->
             val bytes = withContext(Dispatchers.IO) { fetchArtworkBytes(url) }
-            bytes?.let { createArtworkContentUri(it, stationId, packageName) }
+            bytes?.let { createArtworkContentUri(it, stationId) }
         }
 
-        artworkUri?.let { uri ->
-            mediaLibrarySession.connectedControllers.forEach { controller ->
-                try {
-                    grantUriPermission(controller.packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                } catch (e: Exception) {
-                    // 해당 컨트롤러에 권한 부여 실패는 무시
-                }
-            }
-        }
+        artworkUri?.let { grantArtworkUriToAllControllers(it) }
 
+        // 이 시점은 이미 프로그램/곡 정보가 실제로 바뀐 경우이므로, 새 이미지를 못 찾았다면
+        // (예: K-POP 곡이 DB에 커버가 없는 경우) 이전 곡의 이미지를 계속 보여주지 않고 지운다.
+        // 그렇지 않으면 "곡 제목은 바뀌었는데 표지는 이전 곡 그대로"인 잘못된 정보가 노출된다.
         val updatedMetadata = currentItem.mediaMetadata.buildUpon()
             .setSubtitle(nowPlaying.programTitle)
             .setArtist(nowPlaying.currentSong)
-            .apply { artworkUri?.let { setArtworkUri(it) } }
+            .setArtworkUri(artworkUri)
             .build()
 
         val updatedItem = currentItem.buildUpon().setMediaMetadata(updatedMetadata).build()
         player.replaceMediaItem(player.currentMediaItemIndex, updatedItem)
+    }
+
+    // < / > (이전/다음) 버튼 입력을 실제 트랙이 아닌 '채널 전환'으로 처리한다.
+    // 전체 라디오 채널 목록(모든 라디오 탭과 동일한 순서) 상에서 현재 채널의 다음/이전
+    // 채널로 넘어가, 새로 서명된 URL과 최신 편성/곡 정보를 받아와 바로 재생한다.
+    private fun skipToAdjacentStation(direction: Int) {
+        serviceScope.launch {
+            try {
+                val currentItem = player.currentMediaItem ?: return@launch
+                val allStations = stationRepository.getAllStations().first()
+                if (allStations.isEmpty()) return@launch
+                val currentIndex = allStations.indexOfFirst { it.id == currentItem.mediaId }
+                if (currentIndex == -1) return@launch
+                val nextIndex = ((currentIndex + direction) % allStations.size + allStations.size) % allStations.size
+                val nextStation = allStations[nextIndex]
+
+                val newItem = buildEnrichedMediaItem(nextStation)
+                player.setMediaItem(newItem)
+                player.prepare()
+                player.play()
+                stationRepository.saveLastPlayedStationId(nextStation.id)
+            } catch (e: Exception) {
+                // 채널 전환 실패 시 현재 채널 재생을 그대로 유지
+            }
+        }
+    }
+
+    // 방송국의 최신 재생 URL/편성/곡/이미지 정보를 모두 채운 재생 가능한 MediaItem을 생성.
+    // onAddMediaItems(최초 재생)와 skipToAdjacentStation(채널 전환) 양쪽에서 공통으로 사용한다.
+    private suspend fun buildEnrichedMediaItem(station: Station): MediaItem {
+        val freshUrl = withContext(Dispatchers.IO) { stationRepository.getPlaybackUrl(station.id) } ?: station.frequencyOrUrl
+        val nowPlaying = withContext(Dispatchers.IO) { stationRepository.fetchMetadata(station.id) }
+
+        val artworkUri = nowPlaying.imageUrl?.let { url ->
+            val bytes = withContext(Dispatchers.IO) { fetchArtworkBytes(url) }
+            bytes?.let { createArtworkContentUri(it, station.id) }
+        }
+        artworkUri?.let { grantArtworkUriToAllControllers(it) }
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(station.name)
+            .setSubtitle(nowPlaying.programTitle)
+            .setArtist(nowPlaying.currentSong)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+            .apply { artworkUri?.let { setArtworkUri(it) } }
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(station.id)
+            .setUri(android.net.Uri.parse(freshUrl))
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    // 아트워크 content:// URI를 현재 연결된 모든 컨트롤러(카미디어 프로세스 등)에게 읽기 권한 부여
+    private fun grantArtworkUriToAllControllers(uri: android.net.Uri) {
+        mediaLibrarySession.connectedControllers.forEach { controller ->
+            try {
+                grantUriPermission(controller.packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: Exception) {
+                // 해당 컨트롤러에 권한 부여 실패는 무시
+            }
+        }
     }
 
     // Android Auto 미디어 카탈로그 탐색을 위한 콜백 구현
@@ -244,36 +304,16 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     val allStations = runBlocking { repo.getAllStations().first() }
                     mediaItems.mapNotNull { item ->
                         val station = allStations.find { it.id == item.mediaId } ?: return@mapNotNull null
-                        val freshUrl = runBlocking { repo.getPlaybackUrl(station.id) } ?: station.frequencyOrUrl
-                        val nowPlaying = runBlocking { repo.fetchMetadata(station.id) }
-
-                        val metadata = MediaMetadata.Builder()
-                            .setTitle(station.name)
-                            .setSubtitle(nowPlaying.programTitle)
-                            .setArtist(nowPlaying.currentSong)
-                            .setIsBrowsable(false)
-                            .setIsPlayable(true)
-                            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
-                            .apply {
-                                // 카미디어 UI는 원격 https URI나 임베드 바이트를 직접 로드하지 않으므로,
-                                // 이미지를 내려받아 파일로 저장한 뒤 FileProvider의 content:// URI로 노출한다
-                                // (안드로이드 앱과 동일한 이미지 노출).
-                                nowPlaying.imageUrl?.let { url ->
-                                    val bytes = runBlocking { withContext(Dispatchers.IO) { fetchArtworkBytes(url) } }
-                                    if (bytes != null) {
-                                        createArtworkContentUri(bytes, station.id, controller.packageName)?.let { uri ->
-                                            setArtworkUri(uri)
-                                        }
-                                    }
-                                }
+                        val enrichedItem = runBlocking { buildEnrichedMediaItem(station) }
+                        // 최초 재생 요청을 보낸 컨트롤러에도 확실히 아트워크 열람 권한을 부여
+                        enrichedItem.mediaMetadata.artworkUri?.let { uri ->
+                            try {
+                                grantUriPermission(controller.packageName, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            } catch (e: Exception) {
+                                // 무시
                             }
-                            .build()
-
-                        MediaItem.Builder()
-                            .setMediaId(station.id)
-                            .setUri(android.net.Uri.parse(freshUrl))
-                            .setMediaMetadata(metadata)
-                            .build()
+                        }
+                        enrichedItem
                     }.toMutableList()
                 },
                 MoreExecutors.directExecutor()
@@ -332,19 +372,22 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     }
 
     // 내려받은 아트워크를 캐시 파일로 저장하고, 카미디어 프로세스가 읽을 수 있도록
-    // FileProvider의 content:// URI로 노출(권한 부여)한다.
-    private fun createArtworkContentUri(bytes: ByteArray, stationId: String, granteePackage: String): android.net.Uri? {
+    // FileProvider의 content:// URI로 노출한다.
+    // 파일명에 항상 같은 이름(예: "$stationId.jpg")을 쓰면 content:// URI도 매번 동일해져,
+    // 차량 미디어 UI의 이미지 로더가 URI 기준으로 캐싱할 경우 내용이 바뀌어도 이전 이미지를
+    // 계속 보여준다 (K-POP 커버가 곡이 바뀌어도 갱신되지 않던 원인). 매번 고유한 파일명을 써서
+    // URI 자체가 바뀌도록 하고, 이전 캐시 파일은 지운다.
+    private fun createArtworkContentUri(bytes: ByteArray, stationId: String): android.net.Uri? {
         return try {
             val artworkDir = java.io.File(cacheDir, "artwork").apply { mkdirs() }
-            val file = java.io.File(artworkDir, "$stationId.jpg")
+            artworkDir.listFiles { f -> f.name.startsWith("$stationId-") }?.forEach { it.delete() }
+            val file = java.io.File(artworkDir, "$stationId-${System.currentTimeMillis()}.jpg")
             file.writeBytes(bytes)
-            val uri = androidx.core.content.FileProvider.getUriForFile(
+            androidx.core.content.FileProvider.getUriForFile(
                 this@ARMSMediaLibraryService,
                 "$packageName.artworkprovider",
                 file
             )
-            grantUriPermission(granteePackage, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            uri
         } catch (e: Exception) {
             null
         }
@@ -352,10 +395,22 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
     // 실시간 라디오 스트림은 재생 구간(탐색 바)이 의미가 없으므로, duration/seek 관련 정보를
     // 차량 UI에 노출하지 않도록 감싸는 래퍼. 실제 재생/일시정지는 그대로 위임한다.
-    private class LiveRadioPlayer(player: ExoPlayer) : ForwardingPlayer(player) {
+    // 또한 실시간 스트림에는 '다음/이전 트랙' 개념이 없으므로, Now Playing 화면의 < / > 버튼을
+    // 다음/이전 채널로 전환하는 키로 재정의한다.
+    private class LiveRadioPlayer(
+        player: ExoPlayer,
+        private val onSkipToAdjacentStation: (direction: Int) -> Unit
+    ) : ForwardingPlayer(player) {
         override fun getDuration(): Long = C.TIME_UNSET
         override fun getContentDuration(): Long = C.TIME_UNSET
         override fun isCurrentMediaItemSeekable(): Boolean = false
+
+        override fun hasNextMediaItem(): Boolean = true
+        override fun hasPreviousMediaItem(): Boolean = true
+        override fun seekToNext() = onSkipToAdjacentStation(1)
+        override fun seekToPrevious() = onSkipToAdjacentStation(-1)
+        override fun seekToNextMediaItem() = onSkipToAdjacentStation(1)
+        override fun seekToPreviousMediaItem() = onSkipToAdjacentStation(-1)
 
         override fun getAvailableCommands(): Player.Commands {
             return super.getAvailableCommands().buildUpon()
@@ -363,6 +418,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                 .remove(Player.COMMAND_SEEK_BACK)
                 .remove(Player.COMMAND_SEEK_FORWARD)
+                .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .add(Player.COMMAND_SEEK_TO_NEXT)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                 .build()
         }
     }
