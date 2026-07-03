@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
         android:allowBackup="true"
@@ -10,6 +12,10 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ARMSAndroidAuto">
+
+        <!-- Android Auto/Automotive에 미디어 앱으로 등록 -->
+        <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc"/>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -20,21 +26,33 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            
-            <!-- Android Auto integration -->
-            <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc"/>
-            <intent-filter>
-                <action android:name="androidx.car.app.action.CAR_APP" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </activity>
-        
-        <service android:name=".ARMSMediaLibraryService" android:exported="true">
+
+        <service
+            android:name=".ARMSMediaLibraryService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />
                 <action android:name="android.media.browse.MediaBrowserService" />
+                <action android:name="android.car.intent.action.MEDIA_TEMPLATE" />
+                <action android:name="androidx.car.app.mediaextensions.action.MEDIA_TEMPLATE_V2" />
             </intent-filter>
+            <!-- AAOS Media Center가 이 앱을 미디어 소스로 인식하려면 필요 (com.android.car.media의
+                 MediaSource.isMediaTemplate()이 확인하는 opt-in 플래그) -->
+            <meta-data android:name="androidx.car.app.launchable" android:value="true" />
         </service>
+
+        <!-- Now Playing 아트워크를 카미디어(다른 프로세스) UI에 content:// URI로 노출하기 위함 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.artworkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

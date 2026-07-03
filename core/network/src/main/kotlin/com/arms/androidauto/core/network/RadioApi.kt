@@ -315,13 +315,17 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     private fun kpopMetadata(): StationApiResponse {
         val nowPlaying = fetchKpopNowPlaying()
         val imageUrl = nowPlaying?.second?.let { fetchKpopCoverImage(it) }
+        // KBS/SBS와 동일하게, 실제로 화면에 노출되는 필드(programTitle -> subtitle)에
+        // 실시간 곡 정보를 담는다. 이전에는 이 값이 항상 고정 문구였고, 실시간 곡 정보는
+        // 화면에 노출되지 않는 currentSong(artist) 필드에만 담겨 있어 갱신이 반영되지 않았다.
+        val nowPlayingText = nowPlaying?.let { "${it.first} - ${it.second}" }
         return StationApiResponse(
             id = "3",
             name = "K-POP 24/7",
             streamUrl = kpopStreamUrl,
             type = "STREAMING",
-            currentSong = nowPlaying?.let { "${it.first} - ${it.second}" } ?: "쉬지 않고 이어지는 K-POP 논스톱",
-            programTitle = "24시간 K-POP 스트리밍",
+            currentSong = "24시간 K-POP 스트리밍",
+            programTitle = nowPlayingText ?: "24시간 K-POP 스트리밍",
             imageUrl = imageUrl
         )
     }
