@@ -28,11 +28,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import com.arms.androidauto.core.data.NowPlayingInfo
 import com.arms.androidauto.core.data.StationRepository
 import com.arms.androidauto.core.media.MediaPlayer
 import com.arms.androidauto.core.model.Station
@@ -90,17 +93,47 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
 
     var selectedStationId by remember { mutableStateOf<String?>(null) }
     var playingStationId by remember { mutableStateOf<String?>(null) }
-    var currentProgram by remember { mutableStateOf("채널을 선택해주세요") }
-    var currentSong by remember { mutableStateOf("") }
+    var nowPlaying by remember { mutableStateOf(NowPlayingInfo("채널을 선택해주세요", "", null)) }
     var isLoadingMetadata by remember { mutableStateOf(false) }
 
     val selectedStation = stations.find { it.id == selectedStationId }
     val isSelectedPlaying = selectedStationId != null && selectedStationId == playingStationId
 
-    // 목록이 로드되면 최초 1회 첫 채널을 자동 선택
+    // 채널 재생 시작 (중복 재생 방지 + 마지막 재생 채널 저장)
+    // 캐시된 frequencyOrUrl은 서명 토큰이 만료되었을 수 있으므로, 재생 직전에 항상 새 URL을 받아온다.
+    fun playStation(station: Station) {
+        selectedStationId = station.id
+        if (playingStationId == station.id) return
+        player.stop()
+        playingStationId = station.id
+        repository.saveLastPlayedStationId(station.id)
+        coroutineScope.launch {
+            val playbackUrl = try {
+                repository.getPlaybackUrl(station.id)
+            } catch (e: Exception) {
+                null
+            } ?: station.frequencyOrUrl
+            player.play(playbackUrl)
+        }
+    }
+
+    fun stopPlayback() {
+        player.stop()
+        playingStationId = null
+    }
+
+    var hasAutoResumed by remember { mutableStateOf(false) }
+
+    // 목록이 로드되면 최초 1회, 마지막으로 재생했던 채널을 자동 재생 (없으면 첫 채널만 선택)
     LaunchedEffect(stations.isNotEmpty()) {
-        if (selectedStationId == null && stations.isNotEmpty()) {
-            selectedStationId = stations.first().id
+        if (!hasAutoResumed && stations.isNotEmpty()) {
+            hasAutoResumed = true
+            val lastPlayed = stations.find { it.id == repository.getLastPlayedStationId() }
+            if (lastPlayed != null) {
+                playStation(lastPlayed)
+            } else {
+                selectedStationId = stations.first().id
+            }
         }
     }
 
@@ -130,14 +163,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
         val stationId = selectedStationId ?: return@LaunchedEffect
         isLoadingMetadata = true
         try {
-            val metadata = repository.fetchMetadata(stationId)
-            val parts = metadata.split(" | ")
-            if (parts.size == 2) {
-                currentProgram = parts[0].replace("현재 방송: ", "")
-                currentSong = parts[1].replace("음악: ", "")
-            }
+            nowPlaying = repository.fetchMetadata(stationId)
         } catch (e: Exception) {
-            currentSong = "실시간 방송 중"
+            // 에러 시 기존 값 유지
         } finally {
             isLoadingMetadata = false
         }
@@ -179,8 +207,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
             } else {
                 NowPlayingHero(
                     station = selectedStation,
-                    program = currentProgram,
-                    song = currentSong,
+                    nowPlaying = nowPlaying,
                     isLoadingMetadata = isLoadingMetadata,
                     isPlaying = isSelectedPlaying,
                     onFavoriteToggle = {
@@ -195,12 +222,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                         coroutineScope.launch {
                             isLoadingMetadata = true
                             try {
-                                val metadata = repository.fetchMetadata(stationId)
-                                val parts = metadata.split(" | ")
-                                if (parts.size == 2) {
-                                    currentProgram = parts[0].replace("현재 방송: ", "")
-                                    currentSong = parts[1].replace("음악: ", "")
-                                }
+                                nowPlaying = repository.fetchMetadata(stationId)
                             } catch (e: Exception) {
                                 // 에러 시 기존 값 유지
                             } finally {
@@ -211,11 +233,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                     onPlayToggle = {
                         val station = selectedStation ?: return@NowPlayingHero
                         if (isSelectedPlaying) {
-                            player.stop()
-                            playingStationId = null
+                            stopPlayback()
                         } else {
-                            player.play(station.frequencyOrUrl)
-                            playingStationId = station.id
+                            playStation(station)
                         }
                     }
                 )
@@ -242,7 +262,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                             accentColor = accent,
                             isSelected = station.id == selectedStationId,
                             isOnAir = station.id == playingStationId,
-                            onClick = { selectedStationId = station.id }
+                            onClick = { playStation(station) }
                         )
                     }
                 }
@@ -254,8 +274,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
 @Composable
 private fun NowPlayingHero(
     station: Station?,
-    program: String,
-    song: String,
+    nowPlaying: NowPlayingInfo,
     isLoadingMetadata: Boolean,
     isPlaying: Boolean,
     onFavoriteToggle: () -> Unit,
@@ -313,11 +332,24 @@ private fun NowPlayingHero(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                EqualizerBars(isAnimating = isPlaying, color = RadioNeonCyan)
+                if (nowPlaying.imageUrl != null) {
+                    AsyncImage(
+                        model = nowPlaying.imageUrl,
+                        contentDescription = "방송 프로필 이미지",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                    )
+                } else {
+                    Box(modifier = Modifier.size(56.dp), contentAlignment = Alignment.Center) {
+                        EqualizerBars(isAnimating = isPlaying, color = RadioNeonCyan)
+                    }
+                }
                 Spacer(modifier = Modifier.width(14.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = program,
+                        text = nowPlaying.programTitle,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -325,7 +357,7 @@ private fun NowPlayingHero(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = song,
+                        text = nowPlaying.currentSong,
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
