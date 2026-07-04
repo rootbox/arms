@@ -1,7 +1,9 @@
 package com.arms.androidauto
 
+import android.media.audiofx.LoudnessEnhancer
 import android.os.Bundle
 import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
@@ -44,11 +46,30 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // K-POP은 곡이 3~4분마다 바뀌므로 그보다 짧게 잡아 갱신 지연을 최소화한다.
     private val nowPlayingRefreshIntervalMs = 30_000L
 
+    // SBS 파워FM(107.7)은 원본 스트림 자체의 라우드니스가 다른 채널보다 낮아 상대적으로
+    // 작게 들린다. 다른 채널을 줄이는 대신 SBS만 게인을 올려 체감 볼륨을 맞춘다.
+    private val sbsStationId = "2"
+    private val sbsLoudnessBoostMillibels = 1000 // +10dB
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var loudnessEnhancerSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+
     override fun onCreate() {
         super.onCreate()
 
         // 1. ExoPlayer 및 Repository 초기화
-        player = ExoPlayer.Builder(this).build()
+        // 오디오 속성/포커스를 명시적으로 지정하지 않으면, 차량(블루투스/Android Auto) 쪽
+        // 오디오 경로가 아예 열리지 않은 채로 조용히 디코딩만 계속되는 증상이 있었다
+        // (다른 음악 앱이 먼저 재생돼 포커스를 요청해야 그제서야 이 앱 소리도 들리던 문제).
+        // 오디오 포커스를 명시적으로 요청하도록 설정해 재생 시작과 동시에 경로가 열리게 한다.
+        player = ExoPlayer.Builder(this).build().apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus= */ true
+            )
+        }
         stationRepository = StationRepository(this)
 
         // 2. MediaLibrarySession 초기화 및 콜백 바인딩
@@ -72,9 +93,34 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
     override fun onDestroy() {
         nowPlayingRefreshJob?.cancel()
+        loudnessEnhancer?.release()
         player.release()
         mediaLibrarySession.release()
         super.onDestroy()
+    }
+
+    // 채널이 바뀔 때마다 호출: SBS만 게인을 올리고 나머지 채널은 원본 그대로 재생한다.
+    // ExoPlayer의 audioSessionId는 인스턴스 생애주기 동안 보통 고정되지만, 혹시 바뀌더라도
+    // 안전하게 다시 붙이도록 매번 현재 세션ID와 비교해서 필요할 때만 새로 생성한다.
+    private fun applyLoudnessCompensation(stationId: String) {
+        try {
+            val sessionId = player.audioSessionId
+            if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
+            if (loudnessEnhancer == null || loudnessEnhancerSessionId != sessionId) {
+                loudnessEnhancer?.release()
+                loudnessEnhancer = LoudnessEnhancer(sessionId)
+                loudnessEnhancerSessionId = sessionId
+            }
+            val enhancer = loudnessEnhancer ?: return
+            if (stationId == sbsStationId) {
+                enhancer.setTargetGain(sbsLoudnessBoostMillibels)
+                enhancer.enabled = true
+            } else {
+                enhancer.enabled = false
+            }
+        } catch (e: Exception) {
+            // 라우드니스 보정 실패는 무시하고 원본 볼륨으로 재생
+        }
     }
 
     private fun startNowPlayingRefreshLoop() {
@@ -152,6 +198,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 방송국의 최신 재생 URL/편성/곡/이미지 정보를 모두 채운 재생 가능한 MediaItem을 생성.
     // onAddMediaItems(최초 재생)와 skipToAdjacentStation(채널 전환) 양쪽에서 공통으로 사용한다.
     private suspend fun buildEnrichedMediaItem(station: Station): MediaItem {
+        applyLoudnessCompensation(station.id)
         val freshUrl = withContext(Dispatchers.IO) { stationRepository.getPlaybackUrl(station.id) } ?: station.frequencyOrUrl
         val nowPlaying = withContext(Dispatchers.IO) { stationRepository.fetchMetadata(station.id) }
 
@@ -290,6 +337,27 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             )
         }
 
+        // 차량 시동을 끄면 Android Auto/서비스가 종료됐다가, 다시 연결될 때 시스템이 이 콜백으로
+        // "마지막에 뭘 재생 중이었는지" 물어본다. 이걸 구현하지 않으면 세션이 빈 상태로 새로
+        // 시작돼서, 사용자가 직접 채널을 다시 눌러야만 재생이 시작된다 (자동 재개 안 됨).
+        override fun onPlaybackResumption(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            return Futures.transform(
+                Futures.immediateFuture(stationRepository),
+                { repo ->
+                    val lastStationId = repo.getLastPlayedStationId()
+                    val allStations = runBlocking { repo.getAllStations().first() }
+                    val station = allStations.find { it.id == lastStationId } ?: allStations.firstOrNull()
+                    val items = station?.let { ImmutableList.of(runBlocking { buildEnrichedMediaItem(it) }) }
+                        ?: ImmutableList.of()
+                    MediaSession.MediaItemsWithStartPosition(items, 0, 0L)
+                },
+                MoreExecutors.directExecutor()
+            )
+        }
+
         // 차량이 mediaId로 재생을 요청할 때(playFromMediaId), 캐시된 URL이 만료됐을 수 있으므로
         // 실제 재생 직전에 항상 새로 서명된 스트림 URL을 받아오고, 실시간 편성/곡 정보와 이미지를
         // 채워 Now Playing 화면에 실제 방송 프로필/앨범 아트가 보이도록 한다.
@@ -304,6 +372,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     val allStations = runBlocking { repo.getAllStations().first() }
                     mediaItems.mapNotNull { item ->
                         val station = allStations.find { it.id == item.mediaId } ?: return@mapNotNull null
+                        // 차량 브라우징 목록에서 채널을 직접 선택한 경우에도 "마지막 재생 채널"을
+                        // 저장해야, 다음에 시동을 걸었을 때 onPlaybackResumption이 이 채널을
+                        // 정확히 자동 재개할 수 있다.
+                        repo.saveLastPlayedStationId(station.id)
                         val enrichedItem = runBlocking { buildEnrichedMediaItem(station) }
                         // 최초 재생 요청을 보낸 컨트롤러에도 확실히 아트워크 열람 권한을 부여
                         enrichedItem.mediaMetadata.artworkUri?.let { uri ->

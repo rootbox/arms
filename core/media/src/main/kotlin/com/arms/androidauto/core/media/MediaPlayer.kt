@@ -1,6 +1,8 @@
 package com.arms.androidauto.core.media
 
 import android.content.Context
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -17,6 +19,14 @@ class MediaPlayer(private val context: Context) {
         // 실제 Android 앱에서는 Context가 제공되므로 정상 작동.
         try {
             player = ExoPlayer.Builder(context).build().apply {
+                // 오디오 포커스를 명시적으로 요청해야 블루투스 등 외부 출력 경로가 확실히 열린다.
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .build(),
+                    /* handleAudioFocus= */ true
+                )
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: PlaybackException) {
                         onPlaybackError?.invoke(error.message ?: "스트림 재생에 실패했습니다.")
