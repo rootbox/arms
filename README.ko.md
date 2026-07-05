@@ -1,6 +1,8 @@
-# ARMS Android Auto
+# Simple Radio
 
-**A**utomobile **R**adio & **M**usic **S**treaming for Android Auto — 한국 실시간 라디오와 24/7 K-POP 채널을 폰과 차량(Android Auto / Android Automotive OS)에서 들을 수 있는 미디어 앱입니다. Now Playing 화면에는 실제 편성 정보, 실시간 곡 정보, 앨범 아트가 그대로 표시됩니다.
+한국 실시간 라디오와 24/7 K-POP 채널을 폰과 차량(Android Auto / Android Automotive OS)에서 들을 수 있는 미디어 앱입니다. Now Playing 화면에는 실제 편성 정보, 실시간 곡 정보, 앨범 아트가 그대로 표시됩니다.
+
+[1319.space](https://1319.space)에서 만들었습니다. 코드베이스 내부적으로는 여전히 ARMS(Automobile Radio & Music Streaming)라는 이름을 쓰고 있어서, 패키지/클래스 이름과 커밋 히스토리에서 이 이름을 보실 수 있습니다.
 
 [English README](README.md)
 
@@ -58,7 +60,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 3. 맨 아래로 스크롤해서 **버전 정보**를 10번 정도 연속 탭 → "개발자 설정이 활성화되었습니다" 토스트 확인.
 4. 새로 생긴 **개발자 설정** 진입.
 5. **"알 수 없는 소스" (Unknown sources)** 켜기.
-6. 차량에 연결(USB 또는 무선 Android Auto) — 이제 ARMS Android Auto가 미디어 소스로 나타납니다.
+6. 차량에 연결(USB 또는 무선 Android Auto) — 이제 Simple Radio가 미디어 소스로 나타납니다.
 
 채널은 재생되는데 처음 연결 시 소리가 안 들린다면, 다른 미디어 앱에서 한 번 재생을 시도해서 오디오 포커스를 요청해보세요 — 차량으로의 오디오 경로가 어떤 앱이든 포커스를 요청하기 전까지는 열리지 않는, 알려진 Android Auto/블루투스 특성입니다 (이 앱 자체는 이미 오디오 포커스를 요청하도록 구현돼 있지만, 일부 헤드유닛에서는 세션의 첫 연결 시 이 과정이 한 번 더 필요할 수 있습니다).
 

@@ -4,10 +4,25 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Antenna -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M36,42 L24,16"/>
+    <!-- Radio body -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,24 C37.4,24 24,37.4 24,54 C24,70.6 37.4,84 54,84 C70.6,84 84,70.6 84,54 C84,37.4 70.6,24 54,24 Z M54,76 C41.85,76 32,66.15 32,54 C32,41.85 41.85,32 54,32 C66.15,32 76,41.85 76,54 C76,66.15 66.15,76 54,76 Z"/>
+        android:pathData="M33,42 H75 A9,9 0 0 1 84,51 V69 A9,9 0 0 1 75,78 H33 A9,9 0 0 1 24,69 V51 A9,9 0 0 1 33,42 Z"/>
+    <!-- Speaker grill (ring), drawn as a white disc with a background-colored hole punched in the middle -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M48,42 L48,66 L70,54 Z"/>
+        android:pathData="M42,60 m-11,0 a11,11 0 1 0 22,0 a11,11 0 1 0 -22,0"/>
+    <path
+        android:fillColor="@color/ic_launcher_background"
+        android:pathData="M42,60 m-6,0 a6,6 0 1 0 12,0 a6,6 0 1 0 -12,0"/>
+    <!-- Tuner knob -->
+    <path
+        android:fillColor="@color/ic_launcher_background"
+        android:pathData="M70,58 m-5,0 a5,5 0 1 0 10,0 a5,5 0 1 0 -10,0"/>
 </vector>

@@ -179,7 +179,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
             CenterAlignedTopAppBar(
                 title = {
                     Text(
-                        "A R M S   R A D I O",
+                        "S I M P L E   R A D I O",
                         fontWeight = FontWeight.Black,
                         letterSpacing = 3.sp,
                         color = RadioNeonCyan
@@ -263,6 +263,17 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                             isSelected = station.id == selectedStationId,
                             isOnAir = station.id == playingStationId,
                             onClick = { playStation(station) }
+                        )
+                    }
+                    item {
+                        Text(
+                            "Simple Radio · made by 1319.space",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = RadioNeonCyan.copy(alpha = 0.4f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 16.dp),
+                            textAlign = TextAlign.Center
                         )
                     }
                 }

@@ -1,6 +1,8 @@
-# ARMS Android Auto
+# Simple Radio
 
-**A**utomobile **R**adio & **M**usic **S**treaming for Android Auto — a media app that streams Korean live radio and a 24/7 K-POP channel to your phone and your car (Android Auto / Android Automotive OS), with real program schedules, real-time song metadata, and album art on the Now Playing screen.
+A media app that streams Korean live radio and a 24/7 K-POP channel to your phone and your car (Android Auto / Android Automotive OS), with real program schedules, real-time song metadata, and album art on the Now Playing screen.
+
+Made by [1319.space](https://1319.space). Internally the codebase is still named ARMS (Automobile Radio & Music Streaming) — you'll see that name in package/class names and the repo history.
 
 [한국어 README](README.ko.md)
 
@@ -58,7 +60,7 @@ Since this app isn't distributed through Google Play, Android Auto hides it from
 3. Scroll to the bottom and tap the **version number** about 10 times, until you see a "developer settings enabled" toast.
 4. Open the new **Developer settings** entry.
 5. Enable **Unknown sources**.
-6. Connect to your car (USB or wireless Android Auto) — ARMS Android Auto should now appear as a media source.
+6. Connect to your car (USB or wireless Android Auto) — Simple Radio should now appear as a media source.
 
 If a channel plays but you hear nothing on first connect, request audio focus by playing anything from another media app once — this is a known Android Auto/Bluetooth quirk where the audio route to the car doesn't open until some app requests focus. (This app already requests audio focus itself, but on some head units the very first connection of a session can still need this nudge.)
 

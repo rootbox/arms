@@ -246,7 +246,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             params: LibraryParams?
         ): ListenableFuture<LibraryResult<MediaItem>> {
             val rootMetadata = MediaMetadata.Builder()
-                .setTitle("ARMS Android Auto")
+                .setTitle("Simple Radio")
                 .setIsBrowsable(true)
                 .setIsPlayable(false)
                 .build()
