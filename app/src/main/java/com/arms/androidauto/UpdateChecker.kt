@@ -54,16 +54,20 @@ class UpdateChecker(private val context: Context) {
 
     // APK를 캐시에 내려받고 시스템 설치 확인 다이얼로그를 띄운다.
     // 설치 자체는 Android 정책상 항상 사용자 확인이 필요하므로 완전 자동/무음 설치는 불가능하다.
+    // response.body.bytes()로 전체를 메모리에 올리면 APK가 크거나 저사양 기기에서 OOM이 날 수 있으므로,
+    // 디스크로 바로 스트리밍해서 쓴다.
     suspend fun downloadAndInstall(update: UpdateInfo) = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(update.downloadUrl).build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("다운로드 실패: ${response.code}")
-            val bytes = response.body?.bytes() ?: throw IOException("빈 응답")
+            val body = response.body ?: throw IOException("빈 응답")
 
             val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
             updatesDir.listFiles()?.forEach { it.delete() }
             val file = File(updatesDir, "simple-radio-${update.versionName}.apk")
-            file.writeBytes(bytes)
+            body.byteStream().use { input ->
+                file.outputStream().use { output -> input.copyTo(output) }
+            }
 
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.artworkprovider", file)
             withContext(Dispatchers.Main) {
