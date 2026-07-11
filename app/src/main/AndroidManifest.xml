@@ -9,6 +9,8 @@
          차량 미디어 소스 목록에서 사라지는 문제가 있었다. 배터리 최적화 제외를 요청해
          이 강등을 막기 위해 필요한 권한. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 케이블 없이 앱 내에서 새 버전을 내려받아 설치할 수 있도록 (GitHub Releases 기반 업데이트) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"

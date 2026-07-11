@@ -142,6 +142,38 @@ private fun BatteryOptimizationBanner(context: Context) {
     }
 }
 
+// 새 버전이 있을 때 케이블 연결 없이 바로 내려받아 설치할 수 있도록 안내하는 배너.
+// 실제 설치는 항상 시스템 확인 다이얼로그를 한 번 거친다 (Android 정책상 완전 무음 설치는 불가능).
+@Composable
+private fun UpdateAvailableBanner(
+    update: UpdateInfo,
+    isDownloading: Boolean,
+    onDownloadClick: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+            .background(RadioNeonCyan.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(
+            "새 버전 ${update.versionName} 사용 가능",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White,
+            modifier = Modifier.weight(1f)
+        )
+        if (isDownloading) {
+            CircularProgressIndicator(color = RadioNeonCyan, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+        } else {
+            TextButton(onClick = onDownloadClick) {
+                Text("다운로드", color = RadioNeonCyan, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
@@ -149,6 +181,19 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val batteryUnrestricted by rememberIgnoringBatteryOptimizations(context)
+    val updateChecker = remember { UpdateChecker(context) }
+    var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+    var isDownloadingUpdate by remember { mutableStateOf(false) }
+
+    // 케이블/adb 없이도 새 버전을 알 수 있도록, 앱을 열 때마다 GitHub Releases를 조용히 확인한다.
+    // 새 버전이 없으면 아무 것도 표시하지 않고, 있을 때만 배너로 안내한다.
+    LaunchedEffect(Unit) {
+        try {
+            availableUpdate = updateChecker.checkForUpdate()
+        } catch (e: Exception) {
+            // 업데이트 확인 실패는 조용히 무시 (다음 실행 때 다시 시도)
+        }
+    }
 
     // DB의 방송국 목록 관찰 (Flow -> State)
     val stationsState = repository.getAllStations().collectAsState(initial = emptyList())
@@ -265,6 +310,24 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
         ) {
             if (!batteryUnrestricted) {
                 BatteryOptimizationBanner(context)
+            }
+            availableUpdate?.let { update ->
+                UpdateAvailableBanner(
+                    update = update,
+                    isDownloading = isDownloadingUpdate,
+                    onDownloadClick = {
+                        isDownloadingUpdate = true
+                        coroutineScope.launch {
+                            try {
+                                updateChecker.downloadAndInstall(update)
+                            } catch (e: Exception) {
+                                snackbarHostState.showSnackbar("업데이트 다운로드 실패: ${e.message}")
+                            } finally {
+                                isDownloadingUpdate = false
+                            }
+                        }
+                    }
+                )
             }
             if (stations.isEmpty()) {
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {

@@ -72,6 +72,18 @@ Android Auto phone projection can't run on an emulator at all, but you can previ
 2. Install the debug APK on it like any other emulator/device.
 3. The app will appear in the car media launcher (`android.car.intent.action.MEDIA_TEMPLATE` / `androidx.car.app.launchable` are already declared in the manifest).
 
+## Updating without a cable
+
+The app checks GitHub Releases on launch and shows a banner with a one-tap download when a newer version is available — no adb/cable needed after the first install. Android still requires you to confirm the system install dialog each time (this can't be automated for a non-Play-Store app), but there's no more manual APK copying.
+
+To publish a new version as a maintainer:
+
+1. Bump `versionCode`/`versionName` in `app/build.gradle.kts`.
+2. Commit, then tag and push: `git tag v<versionCode> && git push origin v<versionCode>` (e.g. `v3`).
+3. The `.github/workflows/release.yml` workflow builds the APK and publishes it as a GitHub Release automatically — the app's update checker relies on the `v<versionCode>` tag format and finds the `.apk` asset on that release.
+
+This only works while the repo is public, since the update checker calls the GitHub API without any embedded credentials (by design — a token baked into the APK would be extractable).
+
 ## Project structure
 
 ```
