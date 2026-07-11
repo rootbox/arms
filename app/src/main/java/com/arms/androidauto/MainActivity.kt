@@ -1,6 +1,11 @@
 package com.arms.androidauto
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -29,11 +34,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import coil.compose.AsyncImage
 import com.arms.androidauto.core.data.NowPlayingInfo
 import com.arms.androidauto.core.data.StationRepository
@@ -81,11 +90,65 @@ class MainActivity : ComponentActivity() {
 // 채널 아이콘/포인트 컬러를 순환 배정하기 위한 팔레트
 private val channelAccentColors = listOf(RadioNeonCyan, RadioNeonMagenta, RadioNeonOrange)
 
+private fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    return powerManager.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+// 재생을 멈추고 한동안 방치하면 시스템이 앱을 낮은 standby bucket으로 강등시켜, Android Auto가
+// 백그라운드에서 MediaLibraryService를 다시 바인딩하지 못하고 차량 미디어 소스 목록에서
+// 사라지는 문제가 있었다. 배터리 최적화 제외가 안 되어 있으면 설정 화면으로 안내한다.
+// 설정 화면에서 돌아왔을 때 배너가 바로 사라지도록 ON_RESUME마다 다시 확인한다.
+@Composable
+private fun rememberIgnoringBatteryOptimizations(context: Context): State<Boolean> {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val state = remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                state.value = isIgnoringBatteryOptimizations(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    return state
+}
+
+@Composable
+private fun BatteryOptimizationBanner(context: Context) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+            .background(RadioOnAirRed.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(
+            "차량 연결 중 앱이 사라지지 않도록, 배터리 최적화에서 제외해주세요",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White,
+            modifier = Modifier.weight(1f)
+        )
+        TextButton(onClick = {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+        }) {
+            Text("설정", color = RadioNeonCyan, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    val batteryUnrestricted by rememberIgnoringBatteryOptimizations(context)
 
     // DB의 방송국 목록 관찰 (Flow -> State)
     val stationsState = repository.getAllStations().collectAsState(initial = emptyList())
@@ -200,6 +263,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                 .padding(paddingValues)
                 .padding(horizontal = 20.dp)
         ) {
+            if (!batteryUnrestricted) {
+                BatteryOptimizationBanner(context)
+            }
             if (stations.isEmpty()) {
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = RadioNeonCyan)
