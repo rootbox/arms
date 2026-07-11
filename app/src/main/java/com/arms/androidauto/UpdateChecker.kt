@@ -19,6 +19,18 @@ data class UpdateInfo(val versionName: String, val downloadUrl: String)
 class UpdateChecker(private val context: Context) {
     private val client = OkHttpClient()
     private val latestReleaseUrl = "https://api.github.com/repos/rootbox/arms/releases/latest"
+    private val prefs = context.getSharedPreferences("update_checker", Context.MODE_PRIVATE)
+
+    // 설정(정보) 화면/footer에 표시할 현재 설치된 버전.
+    fun currentVersionName(): String {
+        return context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+    }
+
+    // GitHub Releases 확인에 마지막으로 성공한 시각. footer에 "마지막 업데이트 확인" 표시용.
+    fun lastCheckedAtMillis(): Long? {
+        val value = prefs.getLong(KEY_LAST_CHECKED_AT, -1L)
+        return if (value > 0) value else null
+    }
 
     suspend fun checkForUpdate(): UpdateInfo? = withContext(Dispatchers.IO) {
         try {
@@ -30,6 +42,7 @@ class UpdateChecker(private val context: Context) {
 
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
+                prefs.edit().putLong(KEY_LAST_CHECKED_AT, System.currentTimeMillis()).apply()
                 val json = JSONObject(response.body?.string() ?: return@withContext null)
                 val tagName = json.optString("tag_name")
                 val remoteVersionCode = Regex("v(\\d+)").find(tagName)?.groupValues?.get(1)?.toIntOrNull()
@@ -88,5 +101,9 @@ class UpdateChecker(private val context: Context) {
             @Suppress("DEPRECATION")
             packageInfo.versionCode
         }
+    }
+
+    private companion object {
+        const val KEY_LAST_CHECKED_AT = "last_checked_at"
     }
 }
