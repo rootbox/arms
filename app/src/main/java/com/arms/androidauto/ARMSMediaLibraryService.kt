@@ -352,7 +352,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     val station = allStations.find { it.id == lastStationId } ?: allStations.firstOrNull()
                     val items = station?.let { ImmutableList.of(runBlocking { buildEnrichedMediaItem(it) }) }
                         ?: ImmutableList.of()
-                    MediaSession.MediaItemsWithStartPosition(items, 0, 0L)
+                    // startPositionMs를 0으로 고정하면, 방송사 스트림이 되감기 가능한 DVR 버퍼를
+                    // 제공하는 경우 라이브 최신 지점이 아니라 그 버퍼의 맨 앞부분부터 재생을
+                    // 시작해버린다. 시동을 끄고 다시 켰을 때 예전 구간이 재생되다가 결국 멈추던
+                    // 버그가 바로 이 때문이었다. TIME_UNSET으로 두면 라이브 스트림은 최신 지점부터
+                    // 재생을 시작한다.
+                    MediaSession.MediaItemsWithStartPosition(items, 0, C.TIME_UNSET)
                 },
                 MoreExecutors.directExecutor()
             )
