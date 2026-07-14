@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @OptIn(UnstableApi::class)
 class ARMSMediaLibraryService : MediaLibraryService() {
@@ -72,6 +73,30 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         }
         stationRepository = StationRepository(this)
 
+        // 운전 중에는 터널/음영지역 등으로 스트림 연결이 잠깐씩 끊기는 일이 흔한데, ExoPlayer는
+        // 에러가 나면 자동으로 재시도하지 않고 그대로 멈춰있는다. 그러면 "재생되다가 중간에
+        // 끊기고 다시 시작되지 않는" 증상으로 이어진다. 에러 발생 시 잠시 후 같은 채널을
+        // 새로 서명된 URL로 다시 재생 시도하도록 한다.
+        player.addListener(object : Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val stationId = player.currentMediaItem?.mediaId ?: return
+                serviceScope.launch {
+                    delay(3000L)
+                    try {
+                        val station = stationRepository.getAllStations().first().find { it.id == stationId }
+                            ?: return@launch
+                        val newItem = buildEnrichedMediaItem(station)
+                        player.setMediaItem(newItem)
+                        player.prepare()
+                        player.play()
+                    } catch (e: Exception) {
+                        // 이번 재시도가 실패해도, 다시 에러가 나면 onPlayerError가 또 호출되어
+                        // 재시도가 이어진다.
+                    }
+                }
+            }
+        })
+
         // 2. MediaLibrarySession 초기화 및 콜백 바인딩
         // 실시간 라디오는 탐색(seek)이 의미가 없으므로, 재생 구간 바가 뜨지 않도록
         // duration/seek 관련 정보를 감추는 래퍼를 통해 세션에 플레이어를 연결한다.
@@ -89,6 +114,15 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         return mediaLibrarySession
+    }
+
+    // MediaSessionService의 기본 onTaskRemoved()는, 재생 중이 아닐 때 앱 태스크가 최근 목록에서
+    // 제거되면 stopSelf()로 서비스 자체를 완전히 종료시킨다. 이 앱은 재생 중이 아니어도 차량이
+    // 언제든 다시 연결해서 미디어 소스로 찾아야 하는데, 서비스가 내려가면 그 순간부터 Android
+    // Auto가 이 앱을 찾지 못해 "사라지는" 현상으로 이어진다(로그의 "remove task" 강제종료가
+    // 정확히 이 경로). 기본 동작을 건너뛰어 태스크가 제거돼도 서비스가 계속 살아있게 한다.
+    override fun onTaskRemoved(rootIntent: android.content.Intent?) {
+        // super.onTaskRemoved()를 의도적으로 호출하지 않는다.
     }
 
     override fun onDestroy() {
@@ -340,6 +374,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 차량 시동을 끄면 Android Auto/서비스가 종료됐다가, 다시 연결될 때 시스템이 이 콜백으로
         // "마지막에 뭘 재생 중이었는지" 물어본다. 이걸 구현하지 않으면 세션이 빈 상태로 새로
         // 시작돼서, 사용자가 직접 채널을 다시 눌러야만 재생이 시작된다 (자동 재개 안 됨).
+        //
+        // buildEnrichedMediaItem은 URL/편성정보/이미지까지 순차적으로 최대 3번의 네트워크
+        // 호출을 거치는데, 이 콜백이 너무 오래 걸리면 시스템이 응답을 기다리다 포기하고
+        // "재개할 것 없음"으로 처리해버린다 (자동 재개가 안 되던 원인). 일정 시간 안에 못
+        // 끝나면 캐시된 URL/기본 정보만으로 즉시 재생을 시작하는 가벼운 아이템으로 대신하고,
+        // 실제 최신 정보는 곧이어 도는 주기적 갱신 루프가 채워 넣는다.
         override fun onPlaybackResumption(
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo
@@ -350,8 +390,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     val lastStationId = repo.getLastPlayedStationId()
                     val allStations = runBlocking { repo.getAllStations().first() }
                     val station = allStations.find { it.id == lastStationId } ?: allStations.firstOrNull()
-                    val items = station?.let { ImmutableList.of(runBlocking { buildEnrichedMediaItem(it) }) }
-                        ?: ImmutableList.of()
+                    val items = station?.let {
+                        val item = runBlocking {
+                            withTimeoutOrNull(4000L) { buildEnrichedMediaItem(it) } ?: createPlayableItem(it)
+                        }
+                        ImmutableList.of(item)
+                    } ?: ImmutableList.of()
                     // startPositionMs를 0으로 고정하면, 방송사 스트림이 되감기 가능한 DVR 버퍼를
                     // 제공하는 경우 라이브 최신 지점이 아니라 그 버퍼의 맨 앞부분부터 재생을
                     // 시작해버린다. 시동을 끄고 다시 켰을 때 예전 구간이 재생되다가 결국 멈추던
@@ -436,16 +480,21 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         return kotlinx.coroutines.runBlocking { block() }
     }
 
-    // Now Playing 화면에 표시할 방송 프로필/앨범 이미지를 직접 내려받음
+    // Now Playing 화면에 표시할 방송 프로필/앨범 이미지를 직접 내려받음.
+    // 운전 중 잠깐의 신호 끊김 한 번으로 실패하면 다음 30초 주기까지 회색 플레이스홀더로
+    // 남아있게 되므로, 같은 시도 안에서 한 번 더 재시도해 순간적인 네트워크 hiccup을 버틴다.
     private fun fetchArtworkBytes(url: String): ByteArray? {
-        return try {
-            val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            connection.inputStream.use { it.readBytes() }
-        } catch (e: Exception) {
-            null
+        repeat(2) { attempt ->
+            try {
+                val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                return connection.inputStream.use { it.readBytes() }
+            } catch (e: Exception) {
+                if (attempt == 1) return null
+            }
         }
+        return null
     }
 
     // 내려받은 아트워크를 캐시 파일로 저장하고, 카미디어 프로세스가 읽을 수 있도록
