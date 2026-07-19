@@ -1,0 +1,31 @@
+name: Release
+
+# 버전 태그(v<versionCode>, 예: v3)를 푸시하면 APK를 빌드해서 GitHub Release로 자동 발행한다.
+# 앱 내 업데이트 확인 기능(UpdateChecker)이 이 태그 형식과 첨부된 .apk 에셋을 그대로 사용한다.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk simple-radio-${{ github.ref_name }}.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: simple-radio-${{ github.ref_name }}.apk
+          generate_release_notes: true
