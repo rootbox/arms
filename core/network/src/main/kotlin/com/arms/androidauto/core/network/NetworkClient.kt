@@ -14,4 +14,5 @@ object NetworkClient {
         .build()
 
     val radioApiService: RadioApiService = RadioApiServiceImpl(okHttpClient)
+    val synologyMusicApi: SynologyMusicApi = SynologyMusicApiImpl(okHttpClient)
 }
