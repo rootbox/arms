@@ -33,6 +33,8 @@ local.properties
 
 # Keystore files
 *.jks
+*.keystore
+keystore.properties
 
 # Documentation
 docs/*.bak

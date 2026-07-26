@@ -24,11 +24,23 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug
+      # 디버그 빌드 대신 정식 서명된 릴리즈 빌드를 배포한다. 디버그 APK는 debuggable=true에
+      # 디버그 키 서명이라 Play Protect가 사이드로드 설치 시 유해 앱으로 의심한다.
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+
+      - name: Build release APK
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk simple-radio-${{ github.ref_name }}.apk
+        run: cp app/build/outputs/apk/release/app-release.apk simple-radio-${{ github.ref_name }}.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

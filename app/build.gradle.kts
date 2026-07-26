@@ -1,8 +1,23 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.0"
 }
+
+// 릴리즈 서명 정보. 로컬은 keystore.properties(깃 제외), CI는 환경변수로 주입한다.
+// 둘 다 없으면 릴리즈를 미서명으로 두어(assembleRelease는 미서명 APK 생성) 키 없이도
+// 빌드 자체는 통과한다 — 배포용 서명 APK는 CI(또는 키를 가진 로컬)에서만 만들어진다.
+// 디버그 서명키(assembleDebug)는 배포에 부적합하다: Play Protect가 debuggable 플래그와
+// 디버그 키를 유해 앱 신호로 취급하고, CI가 매 빌드 디버그 키를 새로 만들어 서명이 흔들린다.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) FileInputStream(keystorePropertiesFile).use { load(it) }
+}
+val hasReleaseSigning =
+    keystorePropertiesFile.exists() || System.getenv("KEYSTORE_FILE") != null
 
 android {
     namespace = "com.arms.androidauto"
@@ -16,6 +31,22 @@ android {
         versionName = "0.6.1"
     }
 
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            } else if (System.getenv("KEYSTORE_FILE") != null) {
+                storeFile = file(System.getenv("KEYSTORE_FILE"))
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -23,6 +54,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // 서명 정보가 있을 때만 릴리즈 서명을 붙인다(없으면 미서명).
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
