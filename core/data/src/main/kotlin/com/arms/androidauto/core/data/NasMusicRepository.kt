@@ -3,6 +3,7 @@ package com.arms.androidauto.core.data
 import android.content.Context
 import com.arms.androidauto.core.model.NasAlbum
 import com.arms.androidauto.core.model.NasSong
+import com.arms.androidauto.core.model.NasTrack
 import com.arms.androidauto.core.network.NetworkClient
 import com.arms.androidauto.core.network.SynologyCredentials
 import kotlinx.coroutines.Dispatchers
@@ -128,7 +129,7 @@ class NasMusicRepository private constructor(context: Context) {
 
     // 재생 직전 호출. 곡 목록은 캐시를 재사용하고 세션만 새로 받아, 스트리밍 URL에 담기는
     // sid가 앨범 재생 내내 유효하도록 한다.
-    suspend fun getAlbumStreamUrls(album: NasAlbum): List<Pair<NasSong, String>> = mutex.withLock {
+    suspend fun getAlbumStreamUrls(album: NasAlbum): List<NasTrack> = mutex.withLock {
         attachStreamUrls(songs().filter { it.matches(album) })
     }
 
@@ -136,7 +137,7 @@ class NasMusicRepository private constructor(context: Context) {
     //
     // 넘긴 ID 순서를 그대로 유지하는 것이 중요하다. 캐시를 filter로 거르면 캐시에 담긴
     // 순서(=NAS가 준 순서)로 나와버려서, 사용자가 담은 순서와 다르게 재생된다.
-    suspend fun getStreamUrlsForSongIds(songIds: List<String>): List<Pair<NasSong, String>> =
+    suspend fun getStreamUrlsForSongIds(songIds: List<String>): List<NasTrack> =
         mutex.withLock {
             if (songIds.isEmpty()) return@withLock emptyList()
             attachStreamUrls(orderSongsByIds(songs(), songIds))
@@ -150,11 +151,17 @@ class NasMusicRepository private constructor(context: Context) {
 
     // 주의: 호출부가 이미 mutex를 잡고 있다는 전제. 이 안에서 public 함수를 부르면 데드락이다
     // (Mutex는 재진입을 허용하지 않는다).
-    private suspend fun attachStreamUrls(targetSongs: List<NasSong>): List<Pair<NasSong, String>> {
+    private suspend fun attachStreamUrls(targetSongs: List<NasSong>): List<NasTrack> {
         if (targetSongs.isEmpty()) return emptyList()
         val session = session(forceFresh = true) ?: return emptyList()
+        // 스트림 URL과 커버 URL을 같은 세션(sid)으로 함께 서명한다. 커버도 sid가 유효한 동안만
+        // 로드되므로, 재생 URL과 수명을 맞춰야 앨범 아트가 중간에 깨지지 않는다.
         return targetSongs.map { song ->
-            song to api.getStreamUrl(session.credentials, session.sid, song.id)
+            NasTrack(
+                song = song,
+                streamUrl = api.getStreamUrl(session.credentials, session.sid, song.id),
+                artworkUrl = api.getCoverUrl(session.credentials, session.sid, song.id)
+            )
         }
     }
 

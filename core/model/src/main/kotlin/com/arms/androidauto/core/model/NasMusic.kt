@@ -18,3 +18,12 @@ data class NasSong(
     val album: String?,
     val albumArtist: String?
 )
+
+// 재생 직전에 만들어지는 "바로 재생 가능한 곡". 스트림 URL과 커버 URL 모두 같은 세션(sid)으로
+// 서명돼 있어, 세션이 유효한 동안 재생·앨범아트 표시가 함께 유효하다. 커버를 곡과 같은 시점에
+// 묶어두면 재생 경로(폰/차량)가 이미지 로드를 위해 세션을 또 여는 일이 없다.
+data class NasTrack(
+    val song: NasSong,
+    val streamUrl: String,
+    val artworkUrl: String
+)

@@ -1,5 +1,6 @@
 package com.arms.androidauto.auto
 
+import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -8,7 +9,7 @@ import com.arms.androidauto.core.data.NasMusicRepository
 import com.arms.androidauto.core.data.NasPlaylistRepository
 import com.arms.androidauto.core.data.PlaybackStateStore
 import com.arms.androidauto.core.model.NasAlbum
-import com.arms.androidauto.core.model.NasSong
+import com.arms.androidauto.core.model.NasTrack
 
 // 차량 브라우징 트리에서 NAS 음악 부분(최근 재생 / 아티스트 → 앨범)을 구성하고,
 // 앨범을 실제 재생 큐로 바꾸는 책임만 담당한다.
@@ -48,7 +49,7 @@ class NasBrowseTree(
         val tracks = nasPlaylistRepository.getTracks(playlistId)
         if (tracks.isEmpty()) return emptyList()
         return nasRepository.getStreamUrlsForSongIds(tracks.map { it.songId })
-            .mapIndexed { index, (song, streamUrl) -> songItem(song, streamUrl, index) }
+            .mapIndexed { index, track -> songItem(track, index) }
     }
 
     // 최근 재생 목록은 저장된 정보만으로 그린다. NAS에 연결하지 않고도(터널, 로그인 실패 등)
@@ -77,18 +78,22 @@ class NasBrowseTree(
     // 각 곡의 mediaId에도 NAS 접두사를 유지해야, 트랙이 넘어간 뒤에도 플레이어가
     // "지금 NAS를 재생 중"이라고 계속 판단할 수 있다 (이전/다음 동작 분기의 근거).
     suspend fun albumQueue(album: NasAlbum): List<MediaItem> {
-        return nasRepository.getAlbumStreamUrls(album).mapIndexed { index, (song, streamUrl) ->
-            songItem(song, streamUrl, index)
+        return nasRepository.getAlbumStreamUrls(album).mapIndexed { index, track ->
+            songItem(track, index)
         }
     }
 
-    private fun songItem(song: NasSong, streamUrl: String, index: Int): MediaItem {
+    private fun songItem(track: NasTrack, index: Int): MediaItem {
+        val song = track.song
         val metadata = MediaMetadata.Builder()
             .setTitle(song.title)
             .setArtist(song.artist ?: song.albumArtist)
             .setAlbumTitle(song.album)
             .setAlbumArtist(song.albumArtist)
             .setTrackNumber(index + 1)
+            // 앨범 아트. https URL(내부에 sid 포함)이라 차량 이미지 로더가 직접 받아 온다
+            // (라디오처럼 FileProvider로 프록시할 필요 없음).
+            .setArtworkUri(Uri.parse(track.artworkUrl))
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
@@ -97,7 +102,7 @@ class NasBrowseTree(
             // 곡에도 NAS 접두사를 유지해야 트랙이 넘어간 뒤에도 플레이어가
             // "NAS 재생 중"으로 계속 판단한다 (이전/다음 동작 분기의 근거)
             .setMediaId(MediaIdScheme.encodeSong(song.id))
-            .setUri(streamUrl)
+            .setUri(track.streamUrl)
             .setMediaMetadata(metadata)
             .build()
     }

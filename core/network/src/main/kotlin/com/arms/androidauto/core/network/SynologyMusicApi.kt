@@ -34,6 +34,10 @@ interface SynologyMusicApi {
 
     // 세션이 유효한 동안 바로 재생 가능한 스트리밍 URL (별도 요청 없이 URL 자체로 스트리밍됨)
     fun getStreamUrl(credentials: SynologyCredentials, sid: String, songId: String): String
+
+    // 곡의 앨범 커버 이미지 URL. 스트리밍 URL과 마찬가지로 sid가 박혀 있어, 세션이 유효한 동안
+    // 별도 인증 없이 URL 자체로 이미지가 로드된다 (폰의 Coil / 차량의 Media3 이미지 로더 모두).
+    fun getCoverUrl(credentials: SynologyCredentials, sid: String, songId: String): String
 }
 
 class SynologyMusicApiImpl(private val client: OkHttpClient) : SynologyMusicApi {
@@ -102,6 +106,22 @@ class SynologyMusicApiImpl(private val client: OkHttpClient) : SynologyMusicApi 
             .addQueryParameter("api", "SYNO.AudioStation.Stream")
             .addQueryParameter("version", "2")
             .addQueryParameter("method", "stream")
+            .addQueryParameter("id", songId)
+            .addQueryParameter("_sid", sid)
+            .build()
+            .toString()
+    }
+
+    // Audio Station의 곡별 커버 조회(getsongcover). 곡 파일에 박힌 앨범 아트를 그대로 돌려준다.
+    // 커버가 없는 곡이면 서버가 기본 이미지를 주므로, 클라이언트에서 따로 분기할 필요가 없다.
+    override fun getCoverUrl(credentials: SynologyCredentials, sid: String, songId: String): String {
+        val url = credentials.baseUrl.trimEnd('/') + "/webapi/AudioStation/cover.cgi"
+        return url.toHttpUrl().newBuilder()
+            .addQueryParameter("api", "SYNO.AudioStation.Cover")
+            .addQueryParameter("version", "3")
+            .addQueryParameter("method", "getsongcover")
+            .addQueryParameter("library", "shared")
+            .addQueryParameter("view", "default")
             .addQueryParameter("id", songId)
             .addQueryParameter("_sid", sid)
             .build()

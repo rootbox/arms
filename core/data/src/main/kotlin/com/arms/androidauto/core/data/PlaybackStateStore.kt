@@ -62,6 +62,20 @@ class PlaybackStateStore(context: Context) {
         }
     }
 
+    // NAS 재생을 하다 앱이 종료됐을 때 "이어듣기"를 위해 큐 내 트랙 위치와 재생 지점을 저장한다.
+    // 어떤 소스(앨범/플레이리스트)였는지는 saveLastPlayed가 따로 들고 있으므로, 여기서는 그 소스
+    // 안에서의 진행 상태만 기록한다.
+    fun saveNasProgress(trackIndex: Int, positionMs: Long) {
+        prefs.edit()
+            .putInt(KEY_NAS_TRACK_INDEX, trackIndex)
+            .putLong(KEY_NAS_POSITION_MS, positionMs)
+            .apply()
+    }
+
+    // (트랙 인덱스, 위치ms). 저장된 게 없으면 처음부터(0, 0).
+    fun getNasProgress(): Pair<Int, Long> =
+        prefs.getInt(KEY_NAS_TRACK_INDEX, 0) to prefs.getLong(KEY_NAS_POSITION_MS, 0L)
+
     // 차량 루트의 "최근 재생한 앨범" 노드용. 곡 수까지 저장해두는 이유는, 네트워크 없이도
     // 목록을 즉시 그리기 위해서다 (터널이나 NAS 연결 실패 상황에서도 목록은 뜨고, 실제로
     // 누른 순간에 처음 네트워크를 쓴다).
@@ -121,6 +135,9 @@ class PlaybackStateStore(context: Context) {
 
         private const val KEY_LAST_PLAYLIST_ID = "last_played_playlist_id"
         private const val KEY_LAST_PLAYLIST_NAME = "last_played_playlist_name"
+
+        private const val KEY_NAS_TRACK_INDEX = "last_nas_track_index"
+        private const val KEY_NAS_POSITION_MS = "last_nas_position_ms"
 
         private const val KIND_RADIO = "radio"
         private const val KIND_NAS = "nas"

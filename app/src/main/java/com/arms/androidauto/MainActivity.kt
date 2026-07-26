@@ -66,6 +66,7 @@ import com.arms.androidauto.core.data.NasPlaylistRepository
 import com.arms.androidauto.core.model.NasPlaylist
 import com.arms.androidauto.core.model.NasPlaylistTrack
 import com.arms.androidauto.core.model.NasSong
+import com.arms.androidauto.core.model.NasTrack
 import com.arms.androidauto.core.model.Station
 import com.arms.androidauto.core.model.StationType
 import com.arms.androidauto.ui.nas.AddToPlaylistDialog
@@ -254,7 +255,11 @@ internal fun NasPlaybackSource.displaySubtitle(): String = when (this) {
 // 라디오/NAS 여부를 반복해서 분기하지 않고 이 타입 하나로 제목/부제/동작을 결정한다.
 internal sealed class ActivePlayback {
     data class Radio(val station: Station, val nowPlaying: NowPlayingInfo) : ActivePlayback()
-    data class Nas(val source: NasPlaybackSource, val trackTitle: String?) : ActivePlayback()
+    data class Nas(
+        val source: NasPlaybackSource,
+        val trackTitle: String?,
+        val artworkUri: String?
+    ) : ActivePlayback()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -296,6 +301,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     var showNasSettings by remember { mutableStateOf(false) }
     var nasConfigured by remember { mutableStateOf(nasMusicRepository.hasCredentials()) }
     var nasCurrentTrackTitle by remember { mutableStateOf<String?>(null) }
+    var nasCurrentTrackArtwork by remember { mutableStateOf<String?>(null) }
     var isNasPaused by remember { mutableStateOf(false) }
     var nasSearchQuery by remember { mutableStateOf("") }
     var manuallyExpandedArtists by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -376,8 +382,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     // 앨범 전체 / 앨범의 특정 곡부터 / 플레이리스트가 모두 이 함수를 거친다.
     fun playNasQueue(
         source: NasPlaybackSource,
-        loadTracks: suspend () -> List<Pair<NasSong, String>>,
-        startIndex: Int = 0
+        loadTracks: suspend () -> List<NasTrack>,
+        startIndex: Int = 0,
+        startPositionMs: Long = 0L
     ) {
         selectedStationId = null
         playingStationId = null
@@ -391,10 +398,22 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                     nasPlaybackSource = null
                     return@launch
                 }
+                val safeIndex = startIndex.coerceIn(0, tracks.lastIndex)
                 player.playQueue(
-                    tracks.map { (song, url) -> song.title to url },
-                    startIndex.coerceIn(0, tracks.lastIndex)
+                    tracks.map { track ->
+                        MediaPlayer.QueueTrack(
+                            title = track.song.title,
+                            url = track.streamUrl,
+                            artworkUri = track.artworkUrl,
+                            artist = track.song.artist ?: track.song.albumArtist,
+                            album = track.song.album
+                        )
+                    },
+                    safeIndex,
+                    startPositionMs
                 )
+                // 이어듣기 지점을 현재 재생 시작점으로 맞춘다 (이후 트랙 전환/백그라운드 진입 때 갱신됨)
+                playbackStateStore.saveNasProgress(safeIndex, startPositionMs)
                 when (source) {
                     is NasPlaybackSource.Album -> {
                         // 차량의 "최근 재생한 앨범" 목록과 자동 재개에 반영
@@ -414,15 +433,16 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
         }
     }
 
-    fun playNasAlbum(album: NasAlbum, startIndex: Int = 0) {
+    fun playNasAlbum(album: NasAlbum, startIndex: Int = 0, startPositionMs: Long = 0L) {
         playNasQueue(
             source = NasPlaybackSource.Album(album),
             loadTracks = { nasMusicRepository.getAlbumStreamUrls(album) },
-            startIndex = startIndex
+            startIndex = startIndex,
+            startPositionMs = startPositionMs
         )
     }
 
-    fun playNasPlaylist(playlist: NasPlaylist, startIndex: Int = 0) {
+    fun playNasPlaylist(playlist: NasPlaylist, startIndex: Int = 0, startPositionMs: Long = 0L) {
         playNasQueue(
             source = NasPlaybackSource.Playlist(playlist.id, playlist.name),
             loadTracks = {
@@ -435,7 +455,8 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                 }
                 resolved
             },
-            startIndex = startIndex
+            startIndex = startIndex,
+            startPositionMs = startPositionMs
         )
     }
 
@@ -465,7 +486,8 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     // (되짚던 예전 방식은 목록이 로드되기 전에 재생이 시작되면 미니플레이어가 아예 뜨지 않았고,
     //  앨범 목록에 없는 플레이리스트 재생은 표현할 수도 없었다)
     val activePlayback: ActivePlayback? = when {
-        nasPlaybackSource != null -> ActivePlayback.Nas(nasPlaybackSource!!, nasCurrentTrackTitle)
+        nasPlaybackSource != null ->
+            ActivePlayback.Nas(nasPlaybackSource!!, nasCurrentTrackTitle, nasCurrentTrackArtwork)
         playingStationId != null -> stations.find { it.id == playingStationId }
             ?.let { ActivePlayback.Radio(it, nowPlaying) }
         else -> null
@@ -497,16 +519,51 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
 
     var hasAutoResumed by remember { mutableStateOf(false) }
 
-    // 목록이 로드되면 최초 1회, 마지막으로 재생했던 채널을 자동 재생 (없으면 첫 채널만 선택)
-    LaunchedEffect(stations.isNotEmpty()) {
-        if (!hasAutoResumed && stations.isNotEmpty()) {
-            hasAutoResumed = true
-            val lastPlayed = stations.find { it.id == repository.getLastPlayedStationId() }
-            if (lastPlayed != null) {
-                playStation(lastPlayed)
-            } else {
-                selectedStationId = stations.first().id
+    // NAS 재생 중 앱이 백그라운드로 가거나 종료될 때 이어듣기 지점을 남긴다. 전체화면을 열지
+    // 않아 위치 폴링(아래 while 루프)이 안 돌던 경우에도 여기서 마지막 위치가 확실히 저장된다.
+    val autoResumeLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(autoResumeLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && nasPlaybackSource != null) {
+                playbackStateStore.saveNasProgress(player.currentTrackIndex(), player.currentPositionMs())
             }
+        }
+        autoResumeLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { autoResumeLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 목록이 로드되면 최초 1회, 마지막으로 재생하던 것을 자동으로 이어서 재생한다.
+    // 라디오만이 아니라 NAS 앨범/플레이리스트였다면 그것을 이어듣는다 (예전엔 무조건 라디오로 갔다).
+    LaunchedEffect(stations.isNotEmpty()) {
+        if (hasAutoResumed || stations.isEmpty()) return@LaunchedEffect
+        hasAutoResumed = true
+
+        // 저장된 라디오 채널을 트는 폴백. NAS 미설정/삭제 등으로 NAS를 이어갈 수 없을 때 쓴다.
+        fun resumeRadioOrFirst() {
+            val lastStation = stations.find { it.id == repository.getLastPlayedStationId() }
+            if (lastStation != null) playStation(lastStation) else selectedStationId = stations.first().id
+        }
+
+        when (val last = playbackStateStore.getLastPlayed()) {
+            is LastPlayed.Nas -> if (nasConfigured) {
+                val (index, positionMs) = playbackStateStore.getNasProgress()
+                selectedTab = 1
+                playNasAlbum(last.album, index, positionMs)
+            } else resumeRadioOrFirst()
+
+            is LastPlayed.NasPlaylist -> {
+                val playlist = if (nasConfigured) nasPlaylistRepository.getPlaylist(last.playlistId) else null
+                if (playlist != null) {
+                    val (index, positionMs) = playbackStateStore.getNasProgress()
+                    selectedTab = 1
+                    playNasPlaylist(playlist, index, positionMs)
+                } else {
+                    // 플레이리스트가 지워졌거나 NAS 미설정 → 라디오로 폴백
+                    resumeRadioOrFirst()
+                }
+            }
+
+            else -> resumeRadioOrFirst() // LastPlayed.Radio 또는 기록 없음
         }
     }
 
@@ -518,7 +575,14 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                 snackbarHostState.showSnackbar("재생 실패: $message")
             }
         }
-        player.onTrackChanged = { title -> nasCurrentTrackTitle = title }
+        player.onTrackChanged = { title, artwork ->
+            nasCurrentTrackTitle = title
+            nasCurrentTrackArtwork = artwork
+            // 트랙이 넘어갈 때마다 이어듣기 지점을 갱신한다 (전체화면을 안 열어도 인덱스는 정확히 남는다)
+            if (nasPlaybackSource != null) {
+                playbackStateStore.saveNasProgress(player.currentTrackIndex(), player.currentPositionMs())
+            }
+        }
         // 버퍼링·오디오 포커스 상실 등 플레이어가 먼저 멈추는 경우까지 상태를 맞춘다.
         player.onIsPlayingChanged = { playing ->
             if (nasPlaybackSource != null) isNasPaused = !playing
@@ -1108,7 +1172,7 @@ private fun MiniPlayerBar(
         is ActivePlayback.Nas -> {
             title = playback.trackTitle ?: "재생 중"
             subtitle = playback.source.displaySubtitle()
-            imageUrl = null
+            imageUrl = playback.artworkUri
         }
     }
     Surface(
@@ -1222,7 +1286,10 @@ private fun NowPlayingDetailScreen(
     onNext: () -> Unit
 ) {
     val backgroundBrush = Brush.verticalGradient(listOf(RadioBgMid, RadioBgDeep))
-    val imageUrl = (playback as? ActivePlayback.Radio)?.nowPlaying?.imageUrl
+    val imageUrl = when (playback) {
+        is ActivePlayback.Radio -> playback.nowPlaying.imageUrl
+        is ActivePlayback.Nas -> playback.artworkUri
+    }
     val isFavorite = (playback as? ActivePlayback.Radio)?.station?.isFavorite == true
     // 실시간 라디오는 진행바/셔플/반복이 의미가 없다 (끝이 없고 큐도 없다)
     val isTrackPlayback = playback is ActivePlayback.Nas
