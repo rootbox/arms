@@ -1,5 +1,7 @@
 package com.arms.androidauto
 
+import android.content.Context
+import android.media.AudioManager
 import android.media.audiofx.LoudnessEnhancer
 import android.os.Bundle
 import androidx.annotation.OptIn
@@ -39,6 +41,29 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+// 차량 호스트 앱의 패키지명. 이 목록에 있는 컨트롤러가 모두 빠지면 "차량 연결이 끝났다"로 본다.
+internal val CAR_CONTROLLER_PACKAGES = setOf(
+    "com.google.android.projection.gearhead", // Android Auto (폰 투영)
+    "com.android.car.media", // Automotive OS 미디어 센터
+    "com.android.car.carlauncher" // Automotive OS 런처
+)
+
+// 재생이 멈춘 이유별로 "우리가 다시 살려야 하는가"를 정한다.
+// 규칙을 한 곳에 모아둬야, 나중에 새 사유가 생겼을 때 되살리면 안 되는 것(이어폰 분리 등)을
+// 실수로 포함시키지 않는다.
+internal object AudioFocusResumePolicy {
+    fun shouldAutoResume(playWhenReadyChangeReason: Int): Boolean =
+        when (playWhenReadyChangeReason) {
+            // 내비 음성인식/어시스턴트 등이 포커스를 가져가 멈춘 경우
+            Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS,
+            // 포커스 억제가 너무 오래 지속돼 ExoPlayer가 재생을 내려놓은 경우
+            Player.PLAY_WHEN_READY_CHANGE_REASON_SUPPRESSED_TOO_LONG -> true
+            // 사용자가 직접 멈췄거나(USER_REQUEST/REMOTE), 이어폰이 빠졌거나
+            // (AUDIO_BECOMING_NOISY), 재생이 끝난 경우는 의도된 정지다.
+            else -> false
+        }
+}
 
 @OptIn(UnstableApi::class)
 class ARMSMediaLibraryService : MediaLibraryService() {
@@ -83,6 +108,21 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     private val sbsLoudnessBoostMillibels = 1000 // +10dB
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var loudnessEnhancerSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+
+    // 차량 연결이 끊기면 재생을 멈추기까지 두는 짧은 유예. 헤드유닛에 따라 브라우징 갱신 등으로
+    // 컨트롤러가 순간적으로 끊겼다 곧바로 다시 붙는 경우가 있어, 그때 재생이 죽지 않도록 한다.
+    // 사람이 체감하기엔 사실상 즉시이고, 다시 연결되면 아래 onPostConnect에서 취소한다.
+    private val CAR_DISCONNECT_STOP_DELAY_MS = 1_500L
+    private var carDisconnectStopJob: Job? = null
+
+    // 내비 음성인식 등으로 오디오 포커스를 뺏겨 멈춘 뒤, 포커스가 풀렸을 때 스스로 재생을
+    // 되살리기 위한 상태. ExoPlayer는 일시적 상실이면 알아서 재개하지만, 영구 상실
+    // (AUDIOFOCUS_LOSS)이나 너무 오래 눌린 경우에는 재개하지 않고 그대로 멈춰 있는다.
+    private val AUDIO_FOCUS_RESUME_RETRY_INTERVAL_MS = 2_000L
+    private val AUDIO_FOCUS_RESUME_TIMEOUT_MS = 90_000L
+    private var audioFocusResumeJob: Job? = null
+    private var pausedByAudioFocusLoss = false
+    private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     override fun onCreate() {
         super.onCreate()
@@ -144,6 +184,28 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                         // 이번 재시도가 실패해도, 다시 에러가 나면 onPlayerError가 또 호출되어
                         // 재시도가 이어진다 (위 카운터가 폭주를 막는다).
                     }
+                }
+            }
+
+            // 내비 음성인식(티맵 등)이나 어시스턴트가 오디오 포커스를 가져가면 ExoPlayer가
+            // 재생을 멈춘다. 일시적 상실이면 ExoPlayer가 스스로 재개하지만, 상대 앱이 영구
+            // 포커스(AUDIOFOCUS_LOSS)를 요청했거나 상실이 너무 오래 지속돼 억제가 풀린 경우
+            // (SUPPRESSED_TOO_LONG)에는 재개하지 않고 멈춘 채로 남는다 - 음성인식이 끝나도
+            // 라디오가 다시 시작되지 않던 원인. 이 경우 포커스가 풀리는 것을 지켜보다 되살린다.
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (playWhenReady) {
+                    // 스스로 재개했든 아래 재시도로 살아났든, 대기 상태를 푼다.
+                    pausedByAudioFocusLoss = false
+                    audioFocusResumeJob?.cancel()
+                    return
+                }
+                if (AudioFocusResumePolicy.shouldAutoResume(reason)) {
+                    pausedByAudioFocusLoss = true
+                    startAudioFocusResumeLoop()
+                } else {
+                    // 의도된 정지 - 되살리지 않는다.
+                    pausedByAudioFocusLoss = false
+                    audioFocusResumeJob?.cancel()
                 }
             }
         })
@@ -253,6 +315,77 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         } catch (e: Exception) {
             // 라우드니스 보정 실패는 무시하고 원본 볼륨으로 재생
         }
+    }
+
+    // 포커스를 되찾을 때까지 짧은 주기로 재생을 시도한다. 포커스 반환 콜백을 직접 받으려면
+    // ExoPlayer의 포커스 관리를 꺼야 하는데, 그건 차량 오디오 경로가 열리지 않던 예전 문제를
+    // 되살릴 위험이 있어(위 setAudioAttributes 주석) 건드리지 않고 폴링으로 처리한다.
+    private fun startAudioFocusResumeLoop() {
+        if (audioFocusResumeJob?.isActive == true) return
+        audioFocusResumeJob = serviceScope.launch {
+            val deadline = System.currentTimeMillis() + AUDIO_FOCUS_RESUME_TIMEOUT_MS
+            while (System.currentTimeMillis() < deadline) {
+                delay(AUDIO_FOCUS_RESUME_RETRY_INTERVAL_MS)
+                if (!pausedByAudioFocusLoss) return@launch
+                if (player.playWhenReady) return@launch // ExoPlayer가 스스로 재개함
+                if (player.currentMediaItem == null) return@launch // 재생할 것이 없음
+                if (isAudioBusy()) continue
+                resumeAfterAudioFocusLoss()
+            }
+        }
+    }
+
+    // 통화 중이거나 다른 앱이 실제로 소리를 내고 있으면 포커스를 다투지 않는다.
+    // (사용자가 의도적으로 다른 음악 앱으로 넘어간 경우까지 빼앗아오면 안 된다)
+    private fun isAudioBusy(): Boolean = try {
+        audioManager.mode != AudioManager.MODE_NORMAL || audioManager.isMusicActive
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun resumeAfterAudioFocusLoss() {
+        try {
+            // 라디오는 멈춰 있는 동안 버퍼가 낡는다. 그대로 재개하면 지난 구간이 흘러나오거나
+            // 곧 끊기므로, 라이브 최신 지점으로 옮긴 뒤 재생한다. NAS 음악은 유한한 트랙이라
+            // 멈췄던 위치 그대로 이어야 한다.
+            if (!MediaIdScheme.isNas(player.currentMediaItem?.mediaId)) {
+                player.seekToDefaultPosition()
+            }
+            player.play()
+        } catch (e: Exception) {
+            // 이번 시도가 실패해도 다음 주기에 다시 시도한다.
+        }
+    }
+
+    // Android Auto(폰 투영) / Automotive(차량 내장) 컨트롤러인지 판별한다.
+    // 미디어 알림 컨트롤러처럼 세션에 늘 붙어있는 내부 컨트롤러와 구분하기 위해 필요하다.
+    //
+    // Media3의 두 판별 함수는 "레거시 컨트롤러(controllerVersion == 0)"일 때만 true를 돌려준다.
+    // Android Auto는 레거시로 접속하므로 정상 동작하지만, 차량 호스트가 Media3 컨트롤러로 붙는
+    // 구성에서는 놓치게 되므로 패키지명으로도 한 번 더 확인한다. 아래 패키지들은 차량 호스트
+    // 전용이라 폰 UI나 시스템 UI가 잘못 걸릴 여지가 없다.
+    private fun isCarController(controller: MediaSession.ControllerInfo): Boolean =
+        mediaLibrarySession.isAutoCompanionController(controller) ||
+            mediaLibrarySession.isAutomotiveController(controller) ||
+            controller.packageName in CAR_CONTROLLER_PACKAGES
+
+    private fun hasCarControllerConnected(excluding: MediaSession.ControllerInfo? = null): Boolean =
+        mediaLibrarySession.connectedControllers.any { it !== excluding && isCarController(it) }
+
+    // 차량 연결이 끊겼을 때의 정리. 재생을 즉시 멈추고 버퍼와 큐를 모두 버린다.
+    // stop()은 ExoPlayer를 IDLE로 되돌리며 버퍼링해 둔 스트림 데이터를 폐기하고(이 앱은 디스크
+    // 캐시를 쓰지 않으므로 이것이 캐시 제거의 전부다), clearMediaItems()까지 해야 다음 연결에서
+    // 세션이 빈 상태가 되어 프레임워크가 onPlaybackResumption()을 호출한다. 그 경로에서
+    // 새로 서명된 URL과 라이브 최신 지점으로 다시 시작하므로, 낡은 구간이 되살아나지 않는다.
+    private fun stopPlaybackAndClearBuffer() {
+        // 차량이 없는데 뒤늦게 폰에서 소리가 나면 안 되므로 자동 재개 대기도 함께 끊는다.
+        audioFocusResumeJob?.cancel()
+        pausedByAudioFocusLoss = false
+        player.stop()
+        player.clearMediaItems()
+        // 다음 연결은 새 세션이므로 에러 재시도 카운터도 초기화한다.
+        errorRetryCount = 0
+        lastErrorRetryAtMs = 0L
     }
 
     private fun startNowPlayingRefreshLoop() {
@@ -488,16 +621,33 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             MediaSession.MediaItemsWithStartPosition(items, 0, C.TIME_UNSET)
         }
 
-        // 차량 연결이 완전히 끊기면(시동 OFF, 블루투스/USB 분리 등) ExoPlayer를 정지하고 큐를
-        // 비운다. 그래야 다음 연결 시 세션이 idle 상태가 되어 프레임워크가 onPlaybackResumption()을
-        // 호출하고, 그 안의 기존 로직이 새 서명 URL/최신 편성정보/라이브 최신 지점으로 완전히
-        // 새로 시작한다. 이걸 안 하면 끊기기 직전의 낡은 MediaItem이 그대로 남아있다가, 재연결 시
-        // 시스템이 "재생 중이던 걸 이어서" 취급해 오래된 상태로 되살아날 수 있다.
+        // 차량이 다시 붙으면 아래 onDisconnected가 예약해 둔 정지를 취소한다.
+        // (헤드유닛이 잠깐 끊었다 다시 연결하는 경우 재생이 끊기지 않도록)
+        override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            super.onPostConnect(session, controller)
+            if (isCarController(controller)) carDisconnectStopJob?.cancel()
+        }
+
+        // 차량 연결이 끊기면(시동 OFF, USB/블루투스 분리, Android Auto 종료) 재생을 즉시 멈추고
+        // 버퍼와 큐를 비운다. 이 서비스의 플레이어는 차량 전용이라(폰 화면은 자체 플레이어를
+        // 따로 쓴다) 차량이 사라지면 계속 재생할 이유가 없고, 그대로 두면 폰 스피커로 라디오가
+        // 계속 나온다.
+        //
+        // 예전에는 "연결된 컨트롤러가 하나도 없을 때"를 조건으로 삼았는데, 미디어 알림
+        // 컨트롤러처럼 세션에 늘 붙어 있는 내부 컨트롤러가 있어 그 조건이 사실상 참이 되지
+        // 않았다. 그래서 정지 코드가 아예 실행되지 않았다. 이제는 차량 컨트롤러만 세어
+        // 마지막 차량이 빠지는 순간을 정확히 잡는다.
         override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
             super.onDisconnected(session, controller)
-            if (mediaLibrarySession.connectedControllers.isEmpty()) {
-                player.stop()
-                player.clearMediaItems()
+            if (!isCarController(controller)) return
+            // 끊긴 본인이 목록에서 아직 안 빠졌을 수 있으므로 명시적으로 제외하고 센다.
+            if (hasCarControllerConnected(excluding = controller)) return
+
+            carDisconnectStopJob?.cancel()
+            carDisconnectStopJob = serviceScope.launch {
+                delay(CAR_DISCONNECT_STOP_DELAY_MS)
+                if (hasCarControllerConnected()) return@launch
+                stopPlaybackAndClearBuffer()
             }
         }
 
