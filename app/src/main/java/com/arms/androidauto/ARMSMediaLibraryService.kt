@@ -13,10 +13,13 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.CommandButton
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
 import com.arms.androidauto.auto.MediaIdScheme
 import com.arms.androidauto.auto.NasBrowseTree
 import com.arms.androidauto.core.data.LastPlayed
@@ -48,6 +51,11 @@ internal val CAR_CONTROLLER_PACKAGES = setOf(
     "com.android.car.media", // Automotive OS 미디어 센터
     "com.android.car.carlauncher" // Automotive OS 런처
 )
+
+// 차량 화면의 셔플/반복 버튼. Android Auto는 셔플·반복을 기본 버튼으로 그려주지 않고
+// "커스텀 액션"으로 올린 것만 표시하기 때문에, 세션 커스텀 커맨드로 직접 올려야 한다.
+private const val ACTION_TOGGLE_SHUFFLE = "com.arms.androidauto.TOGGLE_SHUFFLE"
+private const val ACTION_CYCLE_REPEAT = "com.arms.androidauto.CYCLE_REPEAT"
 
 // 재생이 멈춘 이유별로 "우리가 다시 살려야 하는가"를 정한다.
 // 규칙을 한 곳에 모아둬야, 나중에 새 사유가 생겼을 때 되살리면 안 되는 것(이어폰 분리 등)을
@@ -208,6 +216,21 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     audioFocusResumeJob?.cancel()
                 }
             }
+
+            // 셔플/반복 버튼은 현재 상태를 이름과 아이콘으로 보여주므로, 상태가 바뀌면
+            // 차량 화면의 버튼도 새로 올려야 한다. 라디오 <-> NAS 전환 시에는 버튼 자체가
+            // 붙었다 떨어져야 하므로 트랙 전환도 함께 본다.
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                updateCustomLayout()
+            }
+
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                updateCustomLayout()
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                updateCustomLayout()
+            }
         })
 
         // 2. MediaLibrarySession 초기화 및 콜백 바인딩
@@ -355,6 +378,48 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         } catch (e: Exception) {
             // 이번 시도가 실패해도 다음 주기에 다시 시도한다.
         }
+    }
+
+    // 차량 화면에 올릴 셔플/반복 버튼을 현재 상태에 맞춰 만든다.
+    //
+    // 라디오는 실시간 방송이라 셔플/반복이 의미가 없으므로 NAS 음악일 때만 올린다.
+    // Media3의 CommandButton에는 "켜짐" 표시가 따로 없어서, 아이콘과 이름으로 현재 상태를
+    // 알려준다(운전 중에 버튼만 보고 지금 상태를 알 수 있어야 한다).
+    private fun buildCustomLayout(): List<CommandButton> {
+        if (!MediaIdScheme.isNas(player.currentMediaItem?.mediaId)) return emptyList()
+
+        val shuffleOn = player.shuffleModeEnabled
+        val shuffleButton = CommandButton.Builder()
+            .setSessionCommand(SessionCommand(ACTION_TOGGLE_SHUFFLE, Bundle.EMPTY))
+            .setIconResId(R.drawable.ic_shuffle)
+            .setDisplayName(if (shuffleOn) "셔플 켜짐" else "셔플 꺼짐")
+            .setEnabled(true)
+            .build()
+
+        val repeatButton = CommandButton.Builder()
+            .setSessionCommand(SessionCommand(ACTION_CYCLE_REPEAT, Bundle.EMPTY))
+            .setIconResId(
+                if (player.repeatMode == Player.REPEAT_MODE_ONE) R.drawable.ic_repeat_one
+                else R.drawable.ic_repeat
+            )
+            .setDisplayName(
+                when (player.repeatMode) {
+                    Player.REPEAT_MODE_ONE -> "한 곡 반복"
+                    Player.REPEAT_MODE_ALL -> "전체 반복"
+                    else -> "반복 꺼짐"
+                }
+            )
+            .setEnabled(true)
+            .build()
+
+        return listOf(shuffleButton, repeatButton)
+    }
+
+    // 상태가 바뀔 때마다 차량 화면의 버튼을 새 상태로 교체한다.
+    // 플레이어 리스너는 세션이 만들어지기 전에도 붙어 있으므로 초기화 여부를 확인한다.
+    private fun updateCustomLayout() {
+        if (!::mediaLibrarySession.isInitialized) return
+        mediaLibrarySession.setCustomLayout(buildCustomLayout())
     }
 
     // Android Auto(폰 투영) / Automotive(차량 내장) 컨트롤러인지 판별한다.
@@ -518,6 +583,49 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
     // Android Auto 미디어 카탈로그 탐색을 위한 콜백 구현
     private inner class LibraryCallback : MediaLibrarySession.Callback {
+
+        // 셔플/반복을 커스텀 액션으로 쓰려면 그 커맨드를 컨트롤러에게 허용해줘야 한다.
+        // 기본 커맨드 묶음에 두 개를 더하고, 접속 시점의 버튼 구성도 함께 내려준다.
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val sessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+                    .add(SessionCommand(ACTION_TOGGLE_SHUFFLE, Bundle.EMPTY))
+                    .add(SessionCommand(ACTION_CYCLE_REPEAT, Bundle.EMPTY))
+                    .build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(sessionCommands)
+                .setCustomLayout(buildCustomLayout())
+                .build()
+        }
+
+        // 차량에서 셔플/반복 버튼을 눌렀을 때. 폰 화면의 동작과 같은 순서로 순환시킨다
+        // (반복: 끄기 -> 전체 -> 한 곡).
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle
+        ): ListenableFuture<SessionResult> {
+            when (customCommand.customAction) {
+                ACTION_TOGGLE_SHUFFLE ->
+                    player.shuffleModeEnabled = !player.shuffleModeEnabled
+                ACTION_CYCLE_REPEAT ->
+                    player.repeatMode = when (player.repeatMode) {
+                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                        else -> Player.REPEAT_MODE_OFF
+                    }
+                else -> return Futures.immediateFuture(
+                    SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED)
+                )
+            }
+            // 위 변경은 플레이어 리스너(onShuffleModeEnabledChanged/onRepeatModeChanged)를
+            // 통해 버튼 갱신으로 이어진다.
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
 
         // 미디어 브라우징의 루트 노드 정의
         override fun onGetLibraryRoot(
@@ -882,8 +990,21 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         }
 
         override fun getAvailableCommands(): Player.Commands {
-            // NAS는 ExoPlayer가 알려주는 기본 커맨드를 그대로 쓴다 (탐색/진행바 살아있음)
-            if (isNasContent()) return super.getAvailableCommands()
+            // NAS는 ExoPlayer가 알려주는 기본 커맨드를 그대로 쓴다 (탐색/진행바 살아있음).
+            // 다만 곡이 여러 개인 큐에서는 이전/다음 커맨드를 명시적으로 올려준다. ExoPlayer는
+            // 큐의 처음/끝에서 해당 커맨드를 내리는데, 그러면 차량 화면에서 이전/다음 버튼이
+            // 통째로 사라져 트랙 이동 수단이 없어진다(라디오 쪽도 같은 이유로 명시해 두었다).
+            // 경계에서 눌러도 ExoPlayer가 안전하게 무시하거나 현재 곡을 다시 재생한다.
+            if (isNasContent()) {
+                val commands = super.getAvailableCommands()
+                if (wrappedPlayer.mediaItemCount <= 1) return commands
+                return commands.buildUpon()
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .build()
+            }
             return super.getAvailableCommands().buildUpon()
                 .remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
                 .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
@@ -933,6 +1054,16 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                     listener.onPlayWhenReadyChanged(playWhenReady, reason)
+                }
+
+                // 이 래퍼는 여기 적어둔 콜백만 전달한다. 빠뜨리면 세션이 그 변화를 아예 모른다.
+                // 셔플/반복은 차량 화면의 버튼 상태와 직결되므로 반드시 넘겨야 한다.
+                override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                    listener.onShuffleModeEnabledChanged(shuffleModeEnabled)
+                }
+
+                override fun onRepeatModeChanged(repeatMode: Int) {
+                    listener.onRepeatModeChanged(repeatMode)
                 }
 
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
