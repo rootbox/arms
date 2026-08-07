@@ -39,9 +39,23 @@ class NasCredentialsStore(context: Context) {
         prefs.edit().clear().apply()
     }
 
+    // 로그인 세션(sid)도 함께 보관한다. 앱을 껐다 켤 때마다 새로 로그인하면 NAS가 매번
+    // "새 로그인"으로 감지해 알림을 보내기 때문에, 살아있는 세션은 재사용한다.
+    // sid는 그 자체로 계정 권한을 갖는 토큰이라 비밀번호와 같은 암호화 저장소에 둔다.
+    fun saveSid(sid: String) {
+        prefs.edit().putString(KEY_SID, sid).apply()
+    }
+
+    fun getSid(): String? = prefs.getString(KEY_SID, null)
+
+    fun clearSid() {
+        prefs.edit().remove(KEY_SID).apply()
+    }
+
     companion object {
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PASSWORD = "password"
+        private const val KEY_SID = "sid"
     }
 }

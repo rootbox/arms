@@ -19,6 +19,22 @@ data class SynologySongResponse(
     val albumArtist: String?
 )
 
+// 곡 목록 조회 결과. "세션이 죽었다"와 "네트워크가 안 된다"를 구분해야, 전자일 때만
+// 다시 로그인하고 후자일 때는 불필요한 로그인을 하지 않는다.
+sealed class SongListResult {
+    data class Success(val songs: List<SynologySongResponse>) : SongListResult()
+
+    // sid가 만료됐거나 무효 - 재로그인이 필요하다.
+    object AuthFailure : SongListResult()
+
+    // 네트워크 오류 등 - 다시 로그인해도 해결되지 않는다.
+    object Failure : SongListResult()
+}
+
+// Synology가 세션 문제로 돌려주는 오류 코드.
+// 105 권한 없음 / 106 세션 만료 / 107 중복 로그인으로 세션 끊김 / 119 sid를 찾을 수 없음
+internal fun isSynologyAuthError(code: Int): Boolean = code == 105 || code == 106 || code == 107 || code == 119
+
 // Synology DSM의 공식 Web API(webapi/)를 통해 Audio Station의 곡 목록을 조회하고,
 // 실제 재생 가능한 스트리밍 URL을 구성한다.
 //
@@ -30,7 +46,7 @@ interface SynologyMusicApi {
     // 로그인에 성공하면 세션 ID(sid)를 반환. 이후 모든 요청에 _sid 파라미터로 사용한다.
     fun login(credentials: SynologyCredentials): String?
 
-    fun getAllSongs(credentials: SynologyCredentials, sid: String): List<SynologySongResponse>
+    fun getAllSongs(credentials: SynologyCredentials, sid: String): SongListResult
 
     // 세션이 유효한 동안 바로 재생 가능한 스트리밍 URL (별도 요청 없이 URL 자체로 스트리밍됨)
     fun getStreamUrl(credentials: SynologyCredentials, sid: String, songId: String): String
@@ -66,7 +82,7 @@ class SynologyMusicApiImpl(private val client: OkHttpClient) : SynologyMusicApi 
         }
     }
 
-    override fun getAllSongs(credentials: SynologyCredentials, sid: String): List<SynologySongResponse> {
+    override fun getAllSongs(credentials: SynologyCredentials, sid: String): SongListResult {
         return try {
             val url = credentials.baseUrl.trimEnd('/') + "/webapi/AudioStation/song.cgi"
             val httpUrl = url.toHttpUrl().newBuilder()
@@ -79,10 +95,19 @@ class SynologyMusicApiImpl(private val client: OkHttpClient) : SynologyMusicApi 
                 .build()
             val request = Request.Builder().url(httpUrl).build()
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return emptyList()
-                val json = JSONObject(response.body?.string() ?: return emptyList())
-                val songArray = json.optJSONObject("data")?.optJSONArray("songs") ?: return emptyList()
-                (0 until songArray.length()).mapNotNull { i ->
+                // 세션이 죽으면 DSM이 HTTP 401/403으로 돌려주는 경우도 있다.
+                if (response.code == 401 || response.code == 403) return SongListResult.AuthFailure
+                if (!response.isSuccessful) return SongListResult.Failure
+                val json = JSONObject(response.body?.string() ?: return SongListResult.Failure)
+                // 보통은 HTTP 200에 success=false + error.code로 온다.
+                if (!json.optBoolean("success", false)) {
+                    val code = json.optJSONObject("error")?.optInt("code", -1) ?: -1
+                    return if (isSynologyAuthError(code)) SongListResult.AuthFailure
+                    else SongListResult.Failure
+                }
+                val songArray = json.optJSONObject("data")?.optJSONArray("songs")
+                    ?: return SongListResult.Failure
+                val songs = (0 until songArray.length()).mapNotNull { i ->
                     val item = songArray.getJSONObject(i)
                     val id = item.optString("id").ifBlank { return@mapNotNull null }
                     val tag = item.optJSONObject("additional")?.optJSONObject("song_tag")
@@ -94,9 +119,10 @@ class SynologyMusicApiImpl(private val client: OkHttpClient) : SynologyMusicApi 
                         albumArtist = tag?.optString("album_artist")?.ifBlank { null }
                     )
                 }
+                SongListResult.Success(songs)
             }
         } catch (e: Exception) {
-            emptyList()
+            SongListResult.Failure
         }
     }
 

@@ -789,6 +789,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     private suspend fun retryNasPlayback() {
         val resumeIndex = player.currentMediaItemIndex
         val resumePositionMs = player.currentPosition
+        // 스트리밍 URL에 박힌 sid가 만료된 것이 재생 실패의 가장 흔한 원인이다.
+        // 세션을 버려야 아래에서 큐를 다시 만들 때 새로 로그인한다. 버리지 않으면
+        // 같은 낡은 sid로 URL을 다시 만들어 똑같이 실패한다.
+        NasMusicRepository.get(this@ARMSMediaLibraryService).invalidateSession()
         // 무엇을 듣고 있었는지에 따라 큐를 다시 만든다. 종류를 구분하지 않으면
         // 플레이리스트를 듣던 중 세션이 만료됐을 때 엉뚱한 앨범으로 갈아탄다.
         val queue = when (val last = playbackStateStore.getLastPlayed()) {

@@ -5,6 +5,7 @@ import com.arms.androidauto.core.model.NasAlbum
 import com.arms.androidauto.core.model.NasSong
 import com.arms.androidauto.core.model.NasTrack
 import com.arms.androidauto.core.network.NetworkClient
+import com.arms.androidauto.core.network.SongListResult
 import com.arms.androidauto.core.network.SynologyCredentials
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -40,6 +41,9 @@ class NasMusicRepository private constructor(context: Context) {
         val obtainedAtMs: Long
     )
 
+    // 저장해둔 sid를 아직 메모리로 안 올렸는지 표시. 앱을 새로 켠 직후 한 번만 읽는다.
+    private var restoredPersistedSession = false
+
     private data class CachedSongs(
         val songs: List<NasSong>,
         val fetchedAtMs: Long
@@ -65,28 +69,57 @@ class NasMusicRepository private constructor(context: Context) {
         }
 
     suspend fun invalidate() = mutex.withLock {
-        cachedSession = null
+        discardSession()
         cachedSongs = null
     }
 
     private fun invalidateBlocking() {
         // 자격증명이 바뀌면 기존 세션/목록은 즉시 무의미해진다. 저장은 동기 API라
         // 락을 잡지 않고 참조만 끊는다 (경합해도 최악이 재조회 1회).
+        // 저장해둔 sid도 지운다 - 다른 계정의 sid를 재사용하면 안 된다.
         cachedSession = null
         cachedSongs = null
+        credentialsStore.clearSid()
+        restoredPersistedSession = true
     }
 
-    // 세션(sid)은 만료될 수 있어 짧게 캐시한다. 재생 URL을 만들 때는 그 URL 안에 sid가
-    // 박히기 때문에, 앨범 한 장을 다 듣는 동안 만료되지 않도록 forceFresh로 새로 받는다.
+    // 로그인 세션(sid)을 얻는다.
+    //
+    // 예전에는 세션을 메모리에만 두고 짧은 TTL로 캐시했는데, 그러면 앱을 껐다 켤 때마다
+    // 반드시 새로 로그인하게 되고 NAS가 그때마다 "새 로그인"으로 감지해 알림을 보냈다.
+    // 이제는 sid를 암호화 저장소에 남겨 앱 재시작 후에도 재사용하고, 실제로 요청이
+    // 인증 오류로 실패했을 때만(fetchSongs 참고) 새로 로그인한다.
     private suspend fun session(forceFresh: Boolean): CachedSession? {
+        val credentials = credentialsStore.get() ?: return null
+
         if (!forceFresh) {
-            cachedSession?.let {
-                if (System.currentTimeMillis() - it.obtainedAtMs < SESSION_TTL_MS) return it
+            cachedSession?.let { if (it.credentials == credentials) return it }
+            // 앱을 새로 켠 직후: 저장해둔 sid가 있으면 그대로 살려 쓴다(로그인 없음).
+            // 죽은 sid라면 첫 요청이 인증 오류로 돌아오고, 그때 새로 로그인한다.
+            if (!restoredPersistedSession) {
+                restoredPersistedSession = true
+                credentialsStore.getSid()?.let { saved ->
+                    return CachedSession(credentials, saved, System.currentTimeMillis())
+                        .also { cachedSession = it }
+                }
             }
         }
-        val credentials = credentialsStore.get() ?: return null
+
         val sid = withContext(Dispatchers.IO) { api.login(credentials) } ?: return null
+        credentialsStore.saveSid(sid)
+        restoredPersistedSession = true
         return CachedSession(credentials, sid, System.currentTimeMillis()).also { cachedSession = it }
+    }
+
+    // 세션이 더 이상 유효하지 않다고 판단됐을 때 버린다. 다음 요청이 새로 로그인한다.
+    // 스트리밍 URL에 박힌 sid가 만료돼 재생이 실패한 경우, 호출부가 이걸 부른 뒤 큐를
+    // 다시 만들어야 낡은 sid로 무한히 재시도하지 않는다.
+    suspend fun invalidateSession() = mutex.withLock { discardSession() }
+
+    private fun discardSession() {
+        cachedSession = null
+        credentialsStore.clearSid()
+        restoredPersistedSession = true
     }
 
     // 앨범은 서버에 고유 ID가 없어 전체 곡을 받아 클라이언트에서 묶는 구조라, 브라우징할
@@ -95,20 +128,33 @@ class NasMusicRepository private constructor(context: Context) {
         cachedSongs?.let {
             if (System.currentTimeMillis() - it.fetchedAtMs < SONGS_TTL_MS) return it.songs
         }
-        val fetched = fetchSongs(forceFreshSession = false)
-        // 빈 목록은 "라이브러리가 비었다"와 "세션이 만료됐다"를 구분할 수 없다. 후자라면
-        // 그대로 두면 차량에 "앨범 없음"으로 보이므로, 새 세션으로 딱 한 번 더 시도한다.
-        val songs = fetched.ifEmpty { fetchSongs(forceFreshSession = true) }
+        val songs = fetchSongs()
         cachedSongs = CachedSongs(songs, System.currentTimeMillis())
         return songs
     }
 
-    private suspend fun fetchSongs(forceFreshSession: Boolean): List<NasSong> {
+    // 저장된(혹은 캐시된) 세션으로 먼저 시도하고, 그 세션이 죽었을 때만 새로 로그인해서
+    // 한 번 더 시도한다. 이 경로가 세션 유효성을 확인해주는 역할도 하기 때문에, 여기서
+    // 성공한 직후에 만들어지는 스트리밍 URL은 살아있는 sid를 쓰게 된다.
+    private suspend fun fetchSongs(): List<NasSong> {
+        val first = requestSongs(forceFreshSession = false)
+        if (first != null) return first
+        // 인증 오류였다 - 낡은 sid를 버리고 새로 로그인해서 재시도
+        discardSession()
+        return requestSongs(forceFreshSession = true) ?: emptyList()
+    }
+
+    // 인증 실패면 null, 그 밖의 실패면 빈 목록을 돌려준다.
+    // (네트워크 오류에 재로그인으로 대응해봐야 의미가 없으므로 구분한다)
+    private suspend fun requestSongs(forceFreshSession: Boolean): List<NasSong>? {
         val session = session(forceFresh = forceFreshSession) ?: return emptyList()
-        return withContext(Dispatchers.IO) {
-            api.getAllSongs(session.credentials, session.sid).map {
-                NasSong(it.id, it.title, it.artist, it.album, it.albumArtist)
-            }
+        return when (val result = withContext(Dispatchers.IO) {
+            api.getAllSongs(session.credentials, session.sid)
+        }) {
+            is SongListResult.Success ->
+                result.songs.map { NasSong(it.id, it.title, it.artist, it.album, it.albumArtist) }
+            SongListResult.AuthFailure -> null
+            SongListResult.Failure -> emptyList()
         }
     }
 
@@ -153,7 +199,12 @@ class NasMusicRepository private constructor(context: Context) {
     // (Mutex는 재진입을 허용하지 않는다).
     private suspend fun attachStreamUrls(targetSongs: List<NasSong>): List<NasTrack> {
         if (targetSongs.isEmpty()) return emptyList()
-        val session = session(forceFresh = true) ?: return emptyList()
+        // 예전에는 여기서 항상 새로 로그인했다(스트리밍 URL에 sid가 박혀 앨범을 다 듣는 동안
+        // 유효해야 한다는 이유). 그런데 이 함수는 songs()가 성공한 직후에만 불리므로 그 세션은
+        // 방금 실제 요청으로 살아있음이 확인된 것이고, 매번 로그인하면 NAS가 "새 로그인"으로
+        // 감지해 알림을 보낸다. 그래서 살아있는 세션을 그대로 재사용한다.
+        // 재생 도중 만료되면 호출부가 invalidateSession() 후 큐를 다시 만들어 복구한다.
+        val session = session(forceFresh = false) ?: return emptyList()
         // 스트림 URL과 커버 URL을 같은 세션(sid)으로 함께 서명한다. 커버도 sid가 유효한 동안만
         // 로드되므로, 재생 URL과 수명을 맞춰야 앨범 아트가 중간에 깨지지 않는다.
         return targetSongs.map { song ->

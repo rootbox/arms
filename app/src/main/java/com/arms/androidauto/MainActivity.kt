@@ -570,8 +570,12 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     // 재생 실패 시 사용자에게 알리고 버튼 상태를 원래대로 되돌림
     LaunchedEffect(player) {
         player.onPlaybackError = { message ->
+            val wasNasPlayback = nasPlaybackSource != null
             playingStationId = null
             coroutineScope.launch {
+                // NAS 재생이 실패하는 가장 흔한 원인은 스트리밍 URL에 박힌 sid 만료다.
+                // 세션을 버려둬야 다시 재생할 때 새로 로그인해서 살아있는 URL을 만든다.
+                if (wasNasPlayback) nasMusicRepository.invalidateSession()
                 snackbarHostState.showSnackbar("재생 실패: $message")
             }
         }
