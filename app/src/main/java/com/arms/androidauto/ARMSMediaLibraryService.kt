@@ -387,6 +387,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     // 차에서 내렸다. 예약된 정지가 있으면 기다리지 말고 즉시 정리한다.
                     carDisconnectStopJob?.cancel()
                     stopPlaybackAndClearBuffer()
+                } else if (!wasConnected && connected) {
+                    discardStaleQueueIfIdle()
                 }
             }
             connection.type.observeForever(observer)
@@ -513,6 +515,20 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 캐시를 쓰지 않으므로 이것이 캐시 제거의 전부다), clearMediaItems()까지 해야 다음 연결에서
     // 세션이 빈 상태가 되어 프레임워크가 onPlaybackResumption()을 호출한다. 그 경로에서
     // 새로 서명된 URL과 라이브 최신 지점으로 다시 시작하므로, 낡은 구간이 되살아나지 않는다.
+    // 차량이 다시 붙는 시점의 안전망.
+    //
+    // 이탈을 놓치면(예전에 onDisconnected가 오지 않아 실제로 그랬다) 지난 주행의 큐가 그대로
+    // 남는다. 프레임워크는 큐가 비어있을 때만 onPlaybackResumption을 부르기 때문에, 그 상태로
+    // 재연결하면 낡은 아이템과 버퍼가 그대로 재생된다 - 스트리밍 URL도 이미 만료됐을 수 있다.
+    // 재생할 의사가 없는데 큐만 남아 있으면 비워서, 재개가 항상 새 URL과 라이브 최신 지점에서
+    // 시작하도록 강제한다. playWhenReady로 판단하는 이유는, 버퍼링 중이라 isPlaying이 잠깐
+    // false인 정상 재생을 끊지 않기 위해서다.
+    private fun discardStaleQueueIfIdle() {
+        if (player.mediaItemCount > 0 && !player.playWhenReady) {
+            stopPlaybackAndClearBuffer()
+        }
+    }
+
     private fun stopPlaybackAndClearBuffer() {
         // 차량이 없는데 뒤늦게 폰에서 소리가 나면 안 되므로 자동 재개 대기도 함께 끊는다.
         audioFocusResumeJob?.cancel()
@@ -804,7 +820,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // (헤드유닛이 잠깐 끊었다 다시 연결하는 경우 재생이 끊기지 않도록)
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
             super.onPostConnect(session, controller)
-            if (isCarController(controller)) carDisconnectStopJob?.cancel()
+            if (!isCarController(controller)) return
+            carDisconnectStopJob?.cancel()
+            // CarConnection 상태를 못 받는 기기에서도 낡은 큐가 되살아나지 않도록 여기서도 확인한다.
+            discardStaleQueueIfIdle()
         }
 
         // 차량 연결이 끊기면(시동 OFF, USB/블루투스 분리, Android Auto 종료) 재생을 즉시 멈추고
