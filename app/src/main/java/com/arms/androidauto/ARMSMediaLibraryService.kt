@@ -5,6 +5,8 @@ import android.media.AudioManager
 import android.media.audiofx.LoudnessEnhancer
 import android.os.Bundle
 import androidx.annotation.OptIn
+import androidx.car.app.connection.CarConnection
+import androidx.lifecycle.Observer
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
@@ -128,9 +130,29 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // (AUDIOFOCUS_LOSS)이나 너무 오래 눌린 경우에는 재개하지 않고 그대로 멈춰 있는다.
     private val AUDIO_FOCUS_RESUME_RETRY_INTERVAL_MS = 2_000L
     private val AUDIO_FOCUS_RESUME_TIMEOUT_MS = 90_000L
+
+    // 재생이 멈추면 미디어 포그라운드 서비스가 내려가고, 그 상태(백그라운드)의 포커스 요청은
+    // 시스템이 아예 무시한다("AudioHardening focus request ignored"). 이때는 몇 번을 더 눌러도
+    // 통하지 않으므로 몇 번 시도해보고 접는다. 예전에는 90초 내내 2초 간격으로 두드려서
+    // 거부 로그와 알림 재게시만 수십 건씩 쌓였다.
+    private val MAX_AUDIO_FOCUS_RESUME_ATTEMPTS = 3
+    // play() 요청이 거부되면 ExoPlayer가 곧바로 playWhenReady를 되돌린다. 그걸 확인할 짧은 여유.
+    private val AUDIO_FOCUS_RESUME_VERIFY_DELAY_MS = 400L
+
     private var audioFocusResumeJob: Job? = null
     private var pausedByAudioFocusLoss = false
     private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+
+    // 차량 연결 상태. Android Auto는 차량 링크가 끊겨도 우리 서비스 바인딩과 미디어 컨트롤러를
+    // 그대로 유지하기 때문에, onDisconnected만으로는 "차에서 내렸다"를 알 수 없다.
+    private var carConnection: CarConnection? = null
+    private var carConnectionObserver: Observer<Int>? = null
+    // null = 아직 상태를 받지 못함. 상태를 못 읽는 기기에서 자동 재개가 통째로 막히지 않도록
+    // "연결 안 됨"을 실제로 확인했을 때만 차단하려고 nullable로 둔다.
+    private var carConnectionType: Int? = null
+
+    private fun isCarDefinitelyDisconnected(): Boolean =
+        carConnectionType == CarConnection.CONNECTION_TYPE_NOT_CONNECTED
 
     override fun onCreate() {
         super.onCreate()
@@ -246,6 +268,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // (재생 시작 시점 한 번만 값을 채우던 기존 방식으로는 방송이 바뀌거나, K-POP처럼
         //  네트워크 호출이 여러 단계라 간헐적으로 유실되는 경우를 따라잡을 수 없었다.)
         startNowPlayingRefreshLoop()
+
+        // 4. 차량 연결/해제를 직접 관찰 (차에서 내린 뒤 폰으로 재생이 새는 것을 막는다)
+        observeCarConnection()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
@@ -263,6 +288,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
     override fun onDestroy() {
         nowPlayingRefreshJob?.cancel()
+        carConnectionObserver?.let { carConnection?.type?.removeObserver(it) }
+        carConnectionObserver = null
+        carConnection = null
         serviceScope.cancel()
         loudnessEnhancer?.release()
         player.release()
@@ -340,6 +368,36 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         }
     }
 
+    // 차량 연결 상태를 직접 관찰한다.
+    //
+    // 예전에는 미디어 컨트롤러가 끊기는 것(onDisconnected)을 차량 이탈 신호로 삼았는데,
+    // Android Auto는 차량 링크가 끊어져도 우리 서비스를 계속 바인딩하고 있어서 그 신호가
+    // 오지 않는 경우가 있다. 실제 주행 로그에서, 차량이 사라진 뒤에도 자동 재개 루프가 살아남아
+    // 폰 스피커로 라디오가 다시 흘러나온 사례가 있었다. 그래서 연결 상태를 직접 본다.
+    private fun observeCarConnection() {
+        try {
+            val connection = CarConnection(this)
+            val observer = Observer<Int> { type ->
+                val wasConnected = carConnectionType?.let {
+                    it != CarConnection.CONNECTION_TYPE_NOT_CONNECTED
+                } ?: false
+                carConnectionType = type
+                val connected = type != CarConnection.CONNECTION_TYPE_NOT_CONNECTED
+                if (wasConnected && !connected) {
+                    // 차에서 내렸다. 예약된 정지가 있으면 기다리지 말고 즉시 정리한다.
+                    carDisconnectStopJob?.cancel()
+                    stopPlaybackAndClearBuffer()
+                }
+            }
+            connection.type.observeForever(observer)
+            carConnection = connection
+            carConnectionObserver = observer
+        } catch (e: Exception) {
+            // 연결 상태를 못 읽어도 앱의 나머지 동작은 그대로 유지한다
+            // (기존 onDisconnected 경로가 폴백으로 남아 있다).
+        }
+    }
+
     // 포커스를 되찾을 때까지 짧은 주기로 재생을 시도한다. 포커스 반환 콜백을 직접 받으려면
     // ExoPlayer의 포커스 관리를 꺼야 하는데, 그건 차량 오디오 경로가 열리지 않던 예전 문제를
     // 되살릴 위험이 있어(위 setAudioAttributes 주석) 건드리지 않고 폴링으로 처리한다.
@@ -347,13 +405,26 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         if (audioFocusResumeJob?.isActive == true) return
         audioFocusResumeJob = serviceScope.launch {
             val deadline = System.currentTimeMillis() + AUDIO_FOCUS_RESUME_TIMEOUT_MS
+            var rejectedAttempts = 0
             while (System.currentTimeMillis() < deadline) {
                 delay(AUDIO_FOCUS_RESUME_RETRY_INTERVAL_MS)
                 if (!pausedByAudioFocusLoss) return@launch
                 if (player.playWhenReady) return@launch // ExoPlayer가 스스로 재개함
                 if (player.currentMediaItem == null) return@launch // 재생할 것이 없음
+                // 차가 없는 것이 확인되면 되살릴 이유가 없다 (폰 스피커로 갑자기 켜지면 안 된다).
+                if (isCarDefinitelyDisconnected()) return@launch
+                // 통화 중이거나 다른 앱이 소리를 내는 중이면 시도 자체를 하지 않는다.
+                // 이건 거부가 아니라 "지금은 때가 아님"이므로 실패로 세지 않는다.
                 if (isAudioBusy()) continue
+
                 resumeAfterAudioFocusLoss()
+                delay(AUDIO_FOCUS_RESUME_VERIFY_DELAY_MS)
+                if (player.playWhenReady) return@launch // 재개 성공
+
+                // 요청이 통하지 않았다. 대개 백그라운드라 시스템이 막는 경우이고,
+                // 그 상태는 계속 두드려도 바뀌지 않는다.
+                rejectedAttempts++
+                if (rejectedAttempts >= MAX_AUDIO_FOCUS_RESUME_ATTEMPTS) return@launch
             }
         }
     }
