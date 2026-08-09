@@ -1,6 +1,6 @@
 # Simple Radio
 
-한국 실시간 라디오와 24/7 K-POP 채널을 폰과 차량(Android Auto / Android Automotive OS)에서 들을 수 있는 미디어 앱입니다. Now Playing 화면에는 실제 편성 정보, 실시간 곡 정보, 앨범 아트가 그대로 표시됩니다.
+차량(Android Auto / Android Automotive OS)에서 두 가지를 듣기 위한 미디어 앱입니다: **한국 실시간 라디오**와 **집 Synology NAS에 있는 내 음악**. Now Playing 화면에는 실제 편성 정보, 실시간 곡 정보, 앨범 아트가 그대로 표시됩니다.
 
 [1319.space](https://1319.space)에서 만들었습니다. 코드베이스 내부적으로는 여전히 ARMS(Automobile Radio & Music Streaming)라는 이름을 쓰고 있어서, 패키지/클래스 이름과 커밋 히스토리에서 이 이름을 보실 수 있습니다.
 
@@ -17,6 +17,15 @@
 - **채널별 음량 보정**: 원본 스트림 자체의 라우드니스가 낮아 상대적으로 조용한 채널이 있으면, 다른 채널을 줄이는 대신 해당 채널만 게인을 올려 전체적인 체감 볼륨을 맞춥니다.
 - **Spotify 감성의 폰 UI**: Jetpack Compose 기반 Now Playing 화면, 앨범 아트에서 추출한 블러 배경.
 - **Android Auto / Android Automotive OS 지원**: Media3 `MediaLibraryService`로 구현되어 있어 차량에서 미디어 소스로 인식되며, 폰 앱과 동일한 실제 아트워크/메타데이터를 그대로 보여줍니다.
+
+### 내 음악 (Synology NAS)
+
+- **NAS 라이브러리 탐색**: 아티스트 → 앨범 → 곡. Synology Audio Station Web API 기반이며, 폰에서 앨범/아티스트 검색을 지원합니다.
+- **플레이리스트**: 원하는 곡만 모아 직접 구성하고 폰과 차량 양쪽에서 재생합니다.
+- **앨범 아트와 메타데이터**: 커버·아티스트·앨범 정보를 NAS에서 가져와 차량 Now Playing 화면까지 그대로 표시합니다.
+- **이어듣기**: 앱을 껐다 켜도 마지막 트랙의 그 위치에서 이어서 재생합니다.
+- **셔플 / 반복**: 폰에서는 기본 컨트롤로, 차량에서는 커스텀 버튼으로 제공합니다.
+- **계정 정보는 기기 밖으로 나가지 않습니다**: NAS 주소/계정/비밀번호는 안드로이드 암호화 저장소에만 저장되고 본인 NAS 외에는 전송되지 않습니다. 로그인 세션을 재사용하기 때문에 앱을 켤 때마다 NAS가 새 로그인으로 감지하지 않습니다.
 
 ## 동작 원리
 
@@ -44,12 +53,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 또는 프로젝트 루트를 Android Studio로 열고, 연결된 기기에서 `app` 실행 구성을 그대로 실행하면 됩니다.
-
-전체 Android 앱을 빌드하지 않고 KBS/SBS/K-POP 조회 로직만 빠르게 확인하고 싶다면, 순수 JVM 기반 CLI 스모크 테스트(`testapp:cli`)도 있습니다:
-
-```bash
-./gradlew :testapp:cli:run
-```
 
 ## Android Auto에서 실행하기
 
@@ -88,13 +91,15 @@ Android Auto 폰 프로젝션 자체는 에뮬레이터에서 절대 실행되�
 
 ```
 app/                    폰 UI (Jetpack Compose) + ARMSMediaLibraryService (차량/Android Auto)
-core/model/             공용 데이터 모델 (Station 등)
-core/network/           KBS/SBS/K-POP 스트림 및 메타데이터 조회 (RadioApi)
-core/data/              StationRepository, Room 데이터베이스, 마지막 재생 채널 저장
-core/media/             폰 UI에서 사용하는 공용 ExoPlayer 래퍼
-core/radio/, core/streaming/   예약된 모듈 (현재는 미사용 placeholder)
-testapp/cli/            Android 앱 없이 core:network 로직만 테스트하는 순수 JVM CLI
+core/model/             공용 데이터 모델 (Station, NasAlbum, NasSong, NasPlaylist 등)
+core/network/           KBS/SBS/K-POP 및 Synology Audio Station API
+core/data/              저장소 계층, Room DB 2개, 암호화 NAS 자격증명, 재생 상태
+core/media/             폰 UI가 사용하는 ExoPlayer 래퍼 (차량 서비스는 별도 플레이어 사용)
 ```
+
+## 문서
+
+아키텍처, 설계 결정, 실제 주행 로그에서 찾은 버그와 그 근본 원인, 이 앱을 Google Play에 올리지 않기로 한 이유까지 전체 기록은 [docs/PROJECT.md](docs/PROJECT.md)에 있습니다.
 
 ## 기여하기
 

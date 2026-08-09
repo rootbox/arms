@@ -1,6 +1,6 @@
 # Simple Radio
 
-A media app that streams Korean live radio and a 24/7 K-POP channel to your phone and your car (Android Auto / Android Automotive OS), with real program schedules, real-time song metadata, and album art on the Now Playing screen.
+A media app for the car (Android Auto / Android Automotive OS) that plays two things: **Korean live radio** and **your own music library on a Synology NAS**. Real program schedules, real-time song metadata, and album art on the Now Playing screen.
 
 Made by [1319.space](https://1319.space). Internally the codebase is still named ARMS (Automobile Radio & Music Streaming) — you'll see that name in package/class names and the repo history.
 
@@ -17,6 +17,15 @@ Made by [1319.space](https://1319.space). Internally the codebase is still named
 - **Per-channel loudness correction**: if one station's stream is noticeably quieter than the others at the source, its output is boosted (not the others attenuated) so volume feels consistent across channels.
 - **Spotify-inspired phone UI**: a Compose-based Now Playing screen with ambient blurred artwork backgrounds.
 - **Android Auto / Android Automotive OS support**: implemented as a Media3 `MediaLibraryService`, so it shows up as a media source in the car, with the same real artwork and metadata as the phone app.
+
+### Your own music (Synology NAS)
+
+- **Browse your NAS library**: artist → album → track, backed by Synology Audio Station's Web API. Album/artist search on the phone.
+- **Playlists**: build your own from any tracks, then play them on the phone or in the car.
+- **Album art and metadata**: cover, artist and album are pulled from the NAS and shown everywhere, including the car's Now Playing screen.
+- **Resume where you left off**: close the app and reopen it — the same track continues from the same position.
+- **Shuffle / repeat**: available on the phone, and in the car as custom actions.
+- **Credentials stay on the device**: NAS address/account/password live only in Android's encrypted storage and are never sent anywhere except your own NAS. The login session is reused across restarts so the NAS doesn't report a new login every time you open the app.
 
 ## How it works
 
@@ -44,12 +53,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Or just open the project root in Android Studio and run the `app` configuration on a connected device.
-
-There's also a plain-JVM CLI smoke test for the network layer (`testapp:cli`) that lets you sanity-check the KBS/SBS/K-POP fetch logic without building the full Android app:
-
-```bash
-./gradlew :testapp:cli:run
-```
 
 ## Running it in Android Auto
 
@@ -80,7 +83,7 @@ To publish a new version as a maintainer:
 
 1. Bump `versionCode`/`versionName` in `app/build.gradle.kts`.
 2. Commit, then tag and push: `git tag v<versionCode> && git push origin v<versionCode>` (e.g. `v3`).
-3. The `.github/workflows/release.yml` workflow builds the APK and publishes it as a GitHub Release automatically — the app's update checker relies on the `v<versionCode>` tag format and finds the `.apk` asset on that release.
+3. The `.github/workflows/release.yml` workflow builds a **release-signed** APK and publishes it as a GitHub Release automatically — the app's update checker relies on the `v<versionCode>` tag format and finds the `.apk` asset on that release. Signing material comes from repo secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`); debug-signed builds are never published, because Play Protect flags them as harmful.
 
 This only works while the repo is public, since the update checker calls the GitHub API without any embedded credentials (by design — a token baked into the APK would be extractable).
 
@@ -88,13 +91,15 @@ This only works while the repo is public, since the update checker calls the Git
 
 ```
 app/                    Phone UI (Jetpack Compose) + ARMSMediaLibraryService (car/Android Auto)
-core/model/             Shared data models (Station, etc.)
-core/network/           KBS/SBS/K-POP stream & metadata fetching (RadioApi)
-core/data/              StationRepository, Room database, last-played-station persistence
-core/media/             Shared ExoPlayer wrapper used by the phone UI
-core/radio/, core/streaming/   Reserved modules (currently unused placeholders)
-testapp/cli/            Plain-JVM CLI for exercising core:network without the Android app
+core/model/             Shared data models (Station, NasAlbum, NasSong, NasPlaylist, ...)
+core/network/           KBS/SBS/K-POP and Synology Audio Station APIs
+core/data/              Repositories, two Room databases, encrypted NAS credentials, playback state
+core/media/             ExoPlayer wrapper used by the phone UI (the car service has its own player)
 ```
+
+## Documentation
+
+See [docs/PROJECT.md](docs/PROJECT.md) for the full picture: architecture, design decisions, the bugs found in real driving logs and their root causes, and why this app is not on Google Play.
 
 ## Contributing
 
@@ -102,7 +107,7 @@ Issues and pull requests are welcome. If you're adding a new station, please mak
 
 ## Disclaimer
 
-This is an unofficial, community project and is not affiliated with or endorsed by KBS, SBS, or LISTEN.moe. Station names, logos, and program data belong to their respective owners and are used here only to display what's actually on air/playing.
+This is an unofficial, community project and is not affiliated with or endorsed by KBS, SBS, LISTEN.moe, or Synology. Station names, logos, and program data belong to their respective owners and are used here only to display what's actually on air/playing.
 
 ## License
 
