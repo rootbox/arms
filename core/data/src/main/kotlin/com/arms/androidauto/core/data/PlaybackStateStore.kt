@@ -98,10 +98,6 @@ class PlaybackStateStore(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    fun clearRecentAlbums() {
-        prefs.edit().remove(KEY_RECENT_ALBUMS).apply()
-    }
-
     // NAS가 설정되어 있는지를 평문으로 따로 들고 있는다. 실제 자격증명 확인(hasCredentials)은
     // 암호화 저장소를 열어야 해서 느리기 때문에, 차량 브라우징 루트처럼 빨라야 하는 곳에서는
     // 이 플래그만 본다. 자격증명 자체가 아니라 "설정됨 여부"만 저장하므로 노출 위험이 없다.

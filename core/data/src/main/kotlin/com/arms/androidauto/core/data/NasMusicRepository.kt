@@ -68,11 +68,6 @@ class NasMusicRepository private constructor(context: Context) {
             sid != null
         }
 
-    suspend fun invalidate() = mutex.withLock {
-        discardSession()
-        cachedSongs = null
-    }
-
     private fun invalidateBlocking() {
         // 자격증명이 바뀌면 기존 세션/목록은 즉시 무의미해진다. 저장은 동기 API라
         // 락을 잡지 않고 참조만 끊는다 (경합해도 최악이 재조회 1회).
@@ -188,12 +183,6 @@ class NasMusicRepository private constructor(context: Context) {
             if (songIds.isEmpty()) return@withLock emptyList()
             attachStreamUrls(orderSongsByIds(songs(), songIds))
         }
-
-    // 곡 정보만 필요할 때 (재생하지 않으므로 세션이 필요 없다). 캐시만 사용.
-    suspend fun findSongsByIds(songIds: List<String>): List<NasSong> = mutex.withLock {
-        if (songIds.isEmpty()) return@withLock emptyList()
-        orderSongsByIds(songs(), songIds)
-    }
 
     // 주의: 호출부가 이미 mutex를 잡고 있다는 전제. 이 안에서 public 함수를 부르면 데드락이다
     // (Mutex는 재진입을 허용하지 않는다).

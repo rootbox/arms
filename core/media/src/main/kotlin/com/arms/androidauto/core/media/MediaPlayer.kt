@@ -53,7 +53,7 @@ class MediaPlayer(private val context: Context) {
                 })
             }
         } catch (e: Exception) {
-            println("MediaPlayer 초기화 실패: ${e.message}")
+            // 초기화 실패 시 player는 null로 남고, 이후 모든 재생 요청이 onPlaybackError로 알린다.
             player = null
         }
     }
@@ -64,9 +64,7 @@ class MediaPlayer(private val context: Context) {
             it.setMediaItem(mediaItem)
             it.prepare()
             it.play()
-            println("MediaPlayer: ${streamUrl} 재생 시작") // 로컬 테스트용 로그
         } ?: run {
-            println("MediaPlayer가 초기화되지 않았습니다. 실제 Android 환경에서 실행해주세요.")
             onPlaybackError?.invoke("미디어 플레이어를 사용할 수 없습니다.")
         }
     }
@@ -138,16 +136,11 @@ class MediaPlayer(private val context: Context) {
 
     fun stop() {
         player?.stop()
-        println("MediaPlayer: 재생 중지") // 로컬 테스트용 로그
     }
 
     // 액티비티 종료 시 자원 해제. stop()과 분리하여, stop() 이후에도 재생을 재개할 수 있도록 함.
     fun release() {
         player?.release()
         player = null
-    }
-
-    fun isPlaying(): Boolean {
-        return player?.isPlaying ?: false
     }
 }

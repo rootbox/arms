@@ -33,8 +33,5 @@ rootProject.name = "ARMSAndroidAuto"
 include(":app")
 include(":core:model")
 include(":core:network")
-include(":core:radio")
-include(":core:streaming")
 include(":core:media")
 include(":core:data")
-include(":testapp:cli") // CUI 테스트 앱
