@@ -88,8 +88,17 @@ desktop           데스크톱 진입점 (신규, main() + 윈도우)
 
 ## 4. 단계 (각 단계 독립 검증)
 
-### Phase 0 — 검증 게이트 (여기서 막히면 방향 재검토)
+### Phase 0 — 검증 게이트 ✅ macOS 통과 (2026-09-17)
 착수 전, **가장 위험한 두 가지를 데스크톱에서 실증**한다. 나머지는 이게 되면 다 된다.
+
+> **결과(macOS)**: 두 게이트 모두 통과.
+> - core/network를 **수정 없이** JVM 데스크톱에서 링크해 KBS·SBS·K-POP 실제 편성·커버·스트림
+>   URL 조회 성공.
+> - VLCJ(libVLC=설치된 VLC.app)로 KBS/SBS(HLS·AAC), K-POP(Opus), NAS 대역(HTTP FLAC)을
+>   모두 디코딩·재생 확인(native-discovery=true, 각 소스 오디오 트랙+재생시간 진행).
+> - 부수 확인: K-POP `/kpop/stream`은 Opus인데 VLCJ가 네이티브 재생 → 데스크톱은 MP3 폴백 불필요.
+> - **Windows는 미검증**(이 환경에 Windows 없음). 같은 VLCJ+libVLC·동일 코덱이라 위험은 낮으나,
+>   Windows 실기 확인은 사용자 몫으로 남는다.
 1. **재생 실증**: 최소 JVM 데스크톱 프로그램으로 VLCJ를 써서 (a) SBS/KBS HLS, (b) LISTEN.moe
    MP3, (c) NAS 스트림 URL을 **macOS와 Windows 양쪽에서** 재생. FLAC 포함.
 2. **코어 재사용 실증**: 그 프로그램에서 `core/network`를 **수정 없이** 링크해 실제 편성/곡/커버를
