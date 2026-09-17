@@ -12,6 +12,9 @@ import java.time.ZonedDateTime
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+// SBS 온에어 API가 주는 현재 프로그램. channelImageUrl은 프로그램 이미지가 없을 때의 폴백.
+data class SbsOnairProgram(val title: String, val imageUrl: String?, val channelImageUrl: String?)
+
 // LISTEN.moe 게이트웨이가 푸시하는 현재 곡. 곡·아티스트·커버가 한 번에 온다.
 data class KpopTrack(val artist: String, val title: String, val coverUrl: String?)
 
@@ -74,6 +77,15 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     private val sbsLiveApiUrl = "https://apis.sbs.co.kr/play-api/1.0/livestream/powerpc/powerfm?protocol=hls&ssl=Y"
 
     // SBS 라디오 페이지(www.sbs.co.kr/radio)가 실제로 호출하는 편성표 API.
+    // 파워FM "지금 방송 중" 프로그램. 제목·시간·프로그램 이미지를 한 번에 준다.
+    // 예전에 쓰던 bora/today는 "보이는 라디오" 편성표라 영상이 있는 방송만 담겨 있어서,
+    // 하루 중 대부분의 시간대(예: 09~22시)에 파워FM 프로그램을 찾지 못하고 커버가 비었다.
+    private val sbsOnairApiUrl = "https://static.apis.sbs.co.kr/play-api/1.0/onair/channel/S07"
+
+    // 프로그램 이미지를 끝내 못 구했을 때 쓰는 파워FM 채널 이미지(SBS가 온에어 API의
+    // background 필드로 제공하는 것과 같은 자원). 회색 빈 칸 대신 최소한 방송사 이미지를 보여준다.
+    private val sbsChannelImageUrl = "https://image.cloud.sbs.co.kr/play/radio/power.jpg"
+
     private val sbsBoraApiUrl = "https://static.apis.sbs.co.kr/radio-api/gorealra/1.0/onair/bora/today?limit=100&todayOnly=false"
 
     // LISTEN.moe의 K-POP 24시간 논스톱 스트림. 만료 토큰이 없는 고정 주소.
@@ -227,6 +239,41 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     }
 
     // SBS 파워FM 공식 편성표에서 현재 시간대에 방송 중인 프로그램명/이미지를 찾음
+    // 온에어 API 응답 해석. 순수 함수로 떼어 실측 페이로드 형태를 테스트로 고정한다.
+    // 이미지는 640x360 썸네일을 우선하고(폰/차량 모두 충분한 해상도), 없으면 작은 program_image,
+    // 그것도 없으면 채널 배경 이미지를 쓴다.
+    internal fun parseSbsOnair(body: String): SbsOnairProgram? {
+        return try {
+            val info = JSONObject(body).optJSONObject("onair")?.optJSONObject("info") ?: return null
+            val title = info.optString("title").ifBlank { return null }
+            val image = info.optJSONObject("thumbs")?.optString("640")?.ifBlank { null }
+                ?: info.optString("program_image").ifBlank { null }
+                ?: info.optString("thumbimg").ifBlank { null }
+            val background = info.optString("background").ifBlank { null }
+            SbsOnairProgram(title = title, imageUrl = image, channelImageUrl = background)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun fetchSbsOnairProgram(): SbsOnairProgram? {
+        return try {
+            val request = Request.Builder()
+                .url(sbsOnairApiUrl)
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: return null
+                if (!response.isSuccessful || body.isEmpty()) return null
+                parseSbsOnair(body)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // 보이는 라디오 편성표(bora/today)에서 현재 파워FM 프로그램을 찾는다. 온에어 API가 안 될 때의
+    // 2차 경로로만 쓴다 - 영상이 있는 방송만 실려 있어 시간대에 따라 비어 있는 경우가 많다.
     private fun fetchSbsCurrentProgram(): Pair<String, String?>? {
         return try {
             val request = Request.Builder()
@@ -259,15 +306,21 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     }
 
     private fun sbsMetadata(): StationApiResponse {
-        val current = fetchSbsCurrentProgram()
+        // 1차: 온에어 API(현재 프로그램 직접 제공). 2차: 보이는 라디오 편성표.
+        // 어느 쪽이든 프로그램 이미지가 없으면 파워FM 채널 이미지로 대신한다 - 커버가
+        // 아예 비어 회색으로 남는 것보다 낫고, 방송사 이미지는 항상 있다.
+        val onair = fetchSbsOnairProgram()
+        val bora = if (onair == null) fetchSbsCurrentProgram() else null
+        val title = onair?.title ?: bora?.first
+        val image = onair?.imageUrl ?: bora?.second ?: onair?.channelImageUrl ?: sbsChannelImageUrl
         return StationApiResponse(
             id = "2",
             name = "SBS 파워FM (107.7 MHz)",
             streamUrl = fetchSbsLiveStreamUrl() ?: "",
             type = "RADIO",
             currentSong = "실시간 라디오 음원 수신 중",
-            programTitle = current?.first ?: "SBS 파워FM 실시간 방송",
-            imageUrl = current?.second
+            programTitle = title ?: "SBS 파워FM 실시간 방송",
+            imageUrl = image
         )
     }
 
