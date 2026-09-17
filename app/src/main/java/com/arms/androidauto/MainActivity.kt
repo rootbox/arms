@@ -55,6 +55,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.arms.androidauto.core.data.LastPlayed
 import com.arms.androidauto.core.data.NasMusicRepository
 import com.arms.androidauto.core.data.PlaybackStateStore
@@ -465,7 +466,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
         coroutineScope.launch {
             isLoadingMetadata = true
             try {
-                nowPlaying = repository.fetchMetadata(stationId)
+                repository.fetchMetadata(stationId)?.let { nowPlaying = it }
             } catch (e: Exception) {
                 // 에러 시 기존 값 유지
             } finally {
@@ -609,11 +610,26 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
         val stationId = selectedStationId ?: return@LaunchedEffect
         isLoadingMetadata = true
         try {
-            nowPlaying = repository.fetchMetadata(stationId)
+            repository.fetchMetadata(stationId)?.let { nowPlaying = it }
         } catch (e: Exception) {
             // 에러 시 기존 값 유지
         } finally {
             isLoadingMetadata = false
+        }
+    }
+
+    // 라디오 재생 중에는 편성/곡 정보를 주기적으로 다시 확인한다. 예전에는 채널을 고를 때 한 번과
+    // 수동 새로고침뿐이라, 프로그램이 바뀌어도 화면이 그대로였고 커버 URL도 갱신되지 않았다.
+    // 조회 실패는 기존 값을 유지한다.
+    LaunchedEffect(playingStationId) {
+        val stationId = playingStationId ?: return@LaunchedEffect
+        while (true) {
+            delay(30_000L)
+            try {
+                repository.fetchMetadata(stationId)?.let { nowPlaying = it }
+            } catch (e: Exception) {
+                // 다음 주기에 다시 시도
+            }
         }
     }
 
@@ -1156,6 +1172,38 @@ private fun NasTabContent(
 
 // 스포티파이 스타일 하단 고정 미니플레이어. 라디오/NAS 어느 쪽이 재생 중이든 이 하나로
 // 통일하고, 탭하면 NowPlayingDetailScreen으로 확장된다.
+// 커버 로드가 실패하면 백오프로 다시 시도한다(5s -> 10s -> 20s -> 40s -> 최대 60s 간격, 포기 없음).
+// Coil은 같은 URL로는 다시 요청하지 않으므로, 요청 파라미터에 시도 횟수를 넣어 새 요청으로 만든다.
+// 예전에는 한 번 실패하면 URL이 바뀔 때까지(채널/곡 변경) 회색으로 남았다.
+@Composable
+private fun RetryingAsyncImage(
+    url: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var attempt by remember(url) { mutableStateOf(0) }
+    var failed by remember(url) { mutableStateOf(false) }
+
+    LaunchedEffect(url, failed) {
+        if (!failed) return@LaunchedEffect
+        delay((5_000L shl attempt.coerceAtMost(4)).coerceAtMost(60_000L))
+        attempt++
+        failed = false
+    }
+
+    AsyncImage(
+        model = ImageRequest.Builder(context)
+            .data(url)
+            .setParameter("retry", attempt)
+            .build(),
+        contentDescription = contentDescription,
+        contentScale = ContentScale.Crop,
+        modifier = modifier,
+        onError = { failed = true }
+    )
+}
+
 @Composable
 private fun MiniPlayerBar(
     playback: ActivePlayback,
@@ -1205,10 +1253,9 @@ private fun MiniPlayerBar(
                     contentAlignment = Alignment.Center
                 ) {
                     if (imageUrl != null) {
-                        AsyncImage(
-                            model = imageUrl,
+                        RetryingAsyncImage(
+                            url = imageUrl,
                             contentDescription = null,
-                            contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
@@ -1344,10 +1391,9 @@ private fun NowPlayingDetailScreen(
             contentAlignment = Alignment.Center
         ) {
             if (imageUrl != null) {
-                AsyncImage(
-                    model = imageUrl,
+                RetryingAsyncImage(
+                    url = imageUrl,
                     contentDescription = "커버 이미지",
-                    contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {

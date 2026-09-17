@@ -59,6 +59,29 @@ internal val CAR_CONTROLLER_PACKAGES = setOf(
 private const val ACTION_TOGGLE_SHUFFLE = "com.arms.androidauto.TOGGLE_SHUFFLE"
 private const val ACTION_CYCLE_REPEAT = "com.arms.androidauto.CYCLE_REPEAT"
 
+// 커버 이미지 재시도 간격. 편성/곡 정보는 그대로인데 커버만 못 받은 경우, 매 8초 주기마다
+// 두드리지 않고 8s -> 16s -> 32s ... 최대 2분 간격으로 다시 받아본다. 포기하지는 않는다 -
+// 최악이라도 2분에 한 번 작은 요청 하나이고, 회색 화면이 편성이 바뀔 때까지 남는 것보다 낫다.
+internal object ArtworkRetryPolicy {
+    private const val BASE_MS = 8_000L
+    private const val MAX_MS = 120_000L
+    fun delayMs(attempt: Int): Long {
+        val shift = attempt.coerceIn(0, 10)
+        return (BASE_MS shl shift).coerceAtMost(MAX_MS)
+    }
+}
+
+// 커버 응답을 이미지로 받아들일지 판단한다. 예전에는 상태코드도 Content-Type도 보지 않고
+// 본문을 통째로 .jpg로 저장해서, CDN 오류 페이지(HTML)가 이미지로 저장돼 회색으로 보였다.
+// Content-Type이 없는 서버도 있으므로 그 경우는 통과시키고 디코딩 검사에 맡긴다.
+internal object ArtworkResponsePolicy {
+    fun isAcceptable(statusCode: Int, contentType: String?): Boolean {
+        if (statusCode !in 200..299) return false
+        if (contentType == null) return true
+        return contentType.trim().lowercase().startsWith("image/")
+    }
+}
+
 // 재생이 멈춘 이유별로 "우리가 다시 살려야 하는가"를 정한다.
 // 규칙을 한 곳에 모아둬야, 나중에 새 사유가 생겼을 때 되살리면 안 되는 것(이어폰 분리 등)을
 // 실수로 포함시키지 않는다.
@@ -111,6 +134,24 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 그 소리를 듣는다. 감지 즉시 반영하면 오히려 화면(새 곡)과 소리(이전 곡 꼬리)가 어긋나므로,
     // 전형적인 버퍼링 지연만큼 늦춰서 반영해 체감 싱크를 맞춘다.
     private val nowPlayingApplyDelayMs = 4_000L
+
+    // 커버 재시도 상태. 편성/곡 정보가 그대로여도 커버만 못 받은 경우가 있어서(이동 중 순간 끊김
+    // 등), 그때는 커버만 따로 다시 받는다. 예전에는 정보가 안 바뀌면 그대로 return해버려서
+    // 한 번 실패한 커버가 편성/곡이 바뀔 때까지 회색으로 남았다.
+    private var artworkRetryStationId: String? = null
+    private var artworkRetryAttempt = 0
+    private var artworkNextRetryAtMs = 0L
+
+    // 커버 다운로드 전용. HttpURLConnection은 http<->https로 스킴이 바뀌는 리다이렉트를 따라가지
+    // 않아 그 경우 리다이렉트 안내 HTML을 이미지로 저장했다. OkHttp는 따라간다.
+    private val artworkHttpClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
 
     // SBS 파워FM(107.7)은 원본 스트림 자체의 라우드니스가 다른 채널보다 낮아 상대적으로
     // 작게 들린다. 다른 채널을 줄이는 대신 SBS만 게인을 올려 체감 볼륨을 맞춘다.
@@ -564,21 +605,48 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         if (MediaIdScheme.isNas(currentItem.mediaId)) return
         val stationId = currentItem.mediaId
 
+        // 조회가 실패하면 아무것도 바꾸지 않는다. 예전에는 실패가 "정보 없음"이라는 값으로 돌아와
+        // "정보가 바뀌었다"로 판정되고, 그 결과 멀쩡한 커버까지 지워졌다.
         val nowPlaying = withContext(Dispatchers.IO) { stationRepository.fetchMetadata(stationId) }
+            ?: return
 
         val unchanged = nowPlaying.programTitle == currentItem.mediaMetadata.subtitle?.toString() &&
             nowPlaying.currentSong == currentItem.mediaMetadata.artist?.toString()
-        if (unchanged) return
+        val imageUrl = nowPlaying.imageUrl
+
+        if (unchanged) {
+            // 정보가 그대로면 커버가 비어 있는 경우에만 할 일이 있다.
+            if (imageUrl == null || currentItem.mediaMetadata.artworkUri != null) return
+            // 정보는 그대로인데 커버만 비어 있다: 백오프 간격에 맞춰 커버만 다시 받는다.
+            if (artworkRetryStationId == stationId && System.currentTimeMillis() < artworkNextRetryAtMs) return
+            val artworkUri = loadArtwork(imageUrl, stationId)
+            if (artworkUri == null) {
+                scheduleArtworkRetry(stationId)
+                return
+            }
+            clearArtworkRetry()
+            // 받는 사이 채널이 바뀌었으면 엉뚱한 채널에 붙이지 않는다.
+            if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
+            val latest = player.currentMediaItem ?: return
+            grantArtworkUriToAllControllers(artworkUri)
+            val withArtwork = latest.buildUpon()
+                .setMediaMetadata(latest.mediaMetadata.buildUpon().setArtworkUri(artworkUri).build())
+                .build()
+            player.replaceMediaItem(player.currentMediaItemIndex, withArtwork)
+            return
+        }
+
+        // 정보가 바뀌었다 = 새 곡/프로그램. 이전 재시도 상태는 의미가 없다.
+        clearArtworkRetry()
 
         // 변경을 감지해도 바로 반영하지 않고 버퍼링 보정 지연만큼 기다린다. 대기 중 채널이
         // 바뀌었거나 재생이 멈췄다면, 이제 와서 낡은(혹은 엉뚱한 채널의) 정보를 적용하지 않는다.
         delay(nowPlayingApplyDelayMs)
         if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
 
-        val artworkUri = nowPlaying.imageUrl?.let { url ->
-            val bytes = withContext(Dispatchers.IO) { fetchArtworkBytes(url) }
-            bytes?.let { createArtworkContentUri(it, stationId) }
-        }
+        val artworkUri = imageUrl?.let { loadArtwork(it, stationId) }
+        // 커버가 있어야 하는데 못 받았다면 다음 주기부터 커버만 다시 시도한다.
+        if (artworkUri == null && imageUrl != null) scheduleArtworkRetry(stationId)
 
         artworkUri?.let { grantArtworkUriToAllControllers(it) }
 
@@ -628,18 +696,18 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     private suspend fun buildEnrichedMediaItem(station: Station): MediaItem {
         applyLoudnessCompensation(station.id)
         val freshUrl = withContext(Dispatchers.IO) { stationRepository.getPlaybackUrl(station.id) } ?: station.frequencyOrUrl
+        // 편성 조회에 실패해도 재생은 시작한다. 정보와 커버는 곧 도는 갱신 루프가 채운다.
         val nowPlaying = withContext(Dispatchers.IO) { stationRepository.fetchMetadata(station.id) }
+        val imageUrl = nowPlaying?.imageUrl
 
-        val artworkUri = nowPlaying.imageUrl?.let { url ->
-            val bytes = withContext(Dispatchers.IO) { fetchArtworkBytes(url) }
-            bytes?.let { createArtworkContentUri(it, station.id) }
-        }
+        val artworkUri = imageUrl?.let { loadArtwork(it, station.id) }
+        if (artworkUri == null && imageUrl != null) scheduleArtworkRetry(station.id) else clearArtworkRetry()
         artworkUri?.let { grantArtworkUriToAllControllers(it) }
 
         val metadata = MediaMetadata.Builder()
             .setTitle(station.name)
-            .setSubtitle(nowPlaying.programTitle)
-            .setArtist(nowPlaying.currentSong)
+            .setSubtitle(nowPlaying?.programTitle ?: "정보 없음")
+            .setArtist(nowPlaying?.currentSong ?: "정보 없음")
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
@@ -984,21 +1052,57 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             .build()
     }
 
-    // Now Playing 화면에 표시할 방송 프로필/앨범 이미지를 직접 내려받음.
-    // 운전 중 잠깐의 신호 끊김 한 번으로 실패하면 다음 30초 주기까지 회색 플레이스홀더로
-    // 남아있게 되므로, 같은 시도 안에서 한 번 더 재시도해 순간적인 네트워크 hiccup을 버틴다.
-    private fun fetchArtworkBytes(url: String): ByteArray? {
+    // 커버 URL을 내려받아 다른 프로세스가 읽을 수 있는 content:// URI로 만든다. 실패하면 null.
+    private suspend fun loadArtwork(url: String, stationId: String): android.net.Uri? {
+        val bytes = withContext(Dispatchers.IO) { fetchArtworkBytes(url) } ?: return null
+        return createArtworkContentUri(bytes, stationId)
+    }
+
+    private fun scheduleArtworkRetry(stationId: String) {
+        if (artworkRetryStationId != stationId) {
+            artworkRetryStationId = stationId
+            artworkRetryAttempt = 0
+        }
+        artworkNextRetryAtMs = System.currentTimeMillis() + ArtworkRetryPolicy.delayMs(artworkRetryAttempt)
+        artworkRetryAttempt++
+    }
+
+    private fun clearArtworkRetry() {
+        artworkRetryStationId = null
+        artworkRetryAttempt = 0
+        artworkNextRetryAtMs = 0L
+    }
+
+    // Now Playing 화면에 표시할 방송 프로필/앨범 이미지를 직접 내려받는다.
+    // 순간적인 신호 끊김을 위해 짧은 간격으로 한 번 더 시도하고, 그래도 안 되면 호출부의
+    // 백오프 재시도(ArtworkRetryPolicy)에 맡긴다. 받은 본문은 상태코드·Content-Type을 확인하고
+    // 실제로 디코딩되는지까지 본다 - 오류 페이지를 이미지라고 저장하지 않기 위해서다.
+    private suspend fun fetchArtworkBytes(url: String): ByteArray? {
         repeat(2) { attempt ->
             try {
-                val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-                connection.connectTimeout = 5000
-                connection.readTimeout = 5000
-                return connection.inputStream.use { it.readBytes() }
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+                artworkHttpClient.newCall(request).execute().use { response ->
+                    if (ArtworkResponsePolicy.isAcceptable(response.code, response.header("Content-Type"))) {
+                        val bytes = response.body?.bytes()
+                        if (bytes != null && bytes.isNotEmpty() && looksLikeDecodableImage(bytes)) return bytes
+                    }
+                }
             } catch (e: Exception) {
-                if (attempt == 1) return null
+                // 아래에서 한 번 더 시도
             }
+            if (attempt == 0) delay(700L)
         }
         return null
+    }
+
+    // 헤더만 읽어 이미지인지 확인한다(비트맵을 실제로 만들지는 않는다).
+    private fun looksLikeDecodableImage(bytes: ByteArray): Boolean {
+        val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        return options.outWidth > 0 && options.outHeight > 0
     }
 
     // 파일명으로 안전한 고정 길이 토큰. 어떤 mediaId가 와도 경로를 깨뜨리지 않는다.

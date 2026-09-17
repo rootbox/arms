@@ -64,12 +64,16 @@ class StationRepository(context: Context) {
     }
 
     // 실제 네트워크 호출로 메타데이터(방송 프로그램명, 곡 정보, 이미지) 조회
-    suspend fun fetchMetadata(stationId: String): NowPlayingInfo {
+    // 조회에 실패하면 null. 예전에는 실패를 "정보 없음"이라는 정상 값처럼 돌려줬는데, 그러면
+    // 호출부가 "정보가 바뀌었다"고 판단해 멀쩡한 편성 정보와 커버를 지워버렸다.
+    // 실패는 실패로 알려서 호출부가 기존 값을 유지하게 한다.
+    suspend fun fetchMetadata(stationId: String): NowPlayingInfo? {
         val metadata = withContext(Dispatchers.IO) { radioApiService.getStationMetadata(stationId) }
+            ?: return null
         return NowPlayingInfo(
-            programTitle = metadata?.programTitle ?: "정보 없음",
-            currentSong = metadata?.currentSong ?: "정보 없음",
-            imageUrl = metadata?.imageUrl
+            programTitle = metadata.programTitle ?: "정보 없음",
+            currentSong = metadata.currentSong ?: "정보 없음",
+            imageUrl = metadata.imageUrl
         )
     }
 

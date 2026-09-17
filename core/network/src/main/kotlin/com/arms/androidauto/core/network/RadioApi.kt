@@ -9,6 +9,37 @@ import org.json.JSONObject
 import java.io.IOException
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+// LISTEN.moe 게이트웨이가 푸시하는 현재 곡. 곡·아티스트·커버가 한 번에 온다.
+data class KpopTrack(val artist: String, val title: String, val coverUrl: String?)
+
+// 게이트웨이 메시지 한 건을 해석한다. TRACK_UPDATE(op=1)가 아니면 null.
+// 순수 함수로 떼어둔 이유는 실제 소켓 없이 페이로드 형태를 테스트로 고정하기 위해서다.
+internal fun parseKpopGatewayMessage(raw: String): KpopTrack? {
+    return try {
+        val message = JSONObject(raw)
+        if (message.optInt("op", -1) != 1) return null
+        if (message.optString("t") != "TRACK_UPDATE") return null
+        val song = message.optJSONObject("d")?.optJSONObject("song") ?: return null
+        val title = song.optString("title").ifBlank { return null }
+        val artists = song.optJSONArray("artists")
+        val artistNames = (0 until (artists?.length() ?: 0))
+            .mapNotNull { artists!!.optJSONObject(it)?.optString("name")?.ifBlank { null } }
+        val albums = song.optJSONArray("albums")
+        val coverFile = (0 until (albums?.length() ?: 0))
+            .mapNotNull { albums!!.optJSONObject(it)?.optString("image")?.ifBlank { null } }
+            .firstOrNull()
+        KpopTrack(
+            artist = artistNames.joinToString(", ").ifBlank { "K-POP" },
+            title = title,
+            coverUrl = coverFile?.let { "https://cdn.listen.moe/covers/$it" }
+        )
+    } catch (e: Exception) {
+        null
+    }
+}
 
 data class StationApiResponse(
     val id: String,
@@ -312,9 +343,51 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         }
     }
 
+    // 게이트웨이(공식 3rd-party API)에 붙어 첫 TRACK_UPDATE 한 건만 받고 끊는다.
+    // 게이트웨이는 접속 직후 현재 곡을 바로 밀어주므로 연결을 유지할 필요가 없고, 이 함수는
+    // 갱신 주기마다 불리는 폴링 구조에 그대로 맞는다.
+    private fun fetchKpopTrackFromGateway(): KpopTrack? {
+        val latch = CountDownLatch(1)
+        var result: KpopTrack? = null
+        val request = Request.Builder()
+            .url("wss://listen.moe/kpop/gateway_v2")
+            .header("User-Agent", "Mozilla/5.0")
+            .build()
+        val socket = try {
+            client.newWebSocket(request, object : okhttp3.WebSocketListener() {
+                override fun onMessage(webSocket: okhttp3.WebSocket, text: String) {
+                    parseKpopGatewayMessage(text)?.let {
+                        result = it
+                        latch.countDown()
+                    }
+                }
+                override fun onFailure(webSocket: okhttp3.WebSocket, t: Throwable, response: okhttp3.Response?) {
+                    latch.countDown()
+                }
+                override fun onClosing(webSocket: okhttp3.WebSocket, code: Int, reason: String) {
+                    latch.countDown()
+                }
+            })
+        } catch (e: Exception) {
+            return null
+        }
+        try {
+            latch.await(10, TimeUnit.SECONDS)
+        } finally {
+            socket.close(1000, null)
+        }
+        return result
+    }
+
     private fun kpopMetadata(): StationApiResponse {
-        val nowPlaying = fetchKpopNowPlaying()
-        val imageUrl = nowPlaying?.second?.let { fetchKpopCoverImage(it) }
+        // 커버는 게이트웨이가 곡과 함께 정확히 알려준다. 예전 방식(SSE로 제목만 받고 GraphQL
+        // 검색으로 커버를 찾기)은 실측에서 유명곡 6곡 중 5곡의 커버를 못 찾았다 - 검색이
+        // 제목을 잘 매칭하지 못한다. 게이트웨이가 안 될 때만 예전 경로로 폴백한다.
+        val gatewayTrack = fetchKpopTrackFromGateway()
+        val nowPlaying: Pair<String, String>? =
+            gatewayTrack?.let { it.artist to it.title } ?: fetchKpopNowPlaying()
+        val imageUrl = gatewayTrack?.coverUrl
+            ?: nowPlaying?.second?.let { if (gatewayTrack == null) fetchKpopCoverImage(it) else null }
         // KBS/SBS와 동일하게, 실제로 화면에 노출되는 필드(programTitle -> subtitle)에
         // 실시간 곡 정보를 담는다. 이전에는 이 값이 항상 고정 문구였고, 실시간 곡 정보는
         // 화면에 노출되지 않는 currentSong(artist) 필드에만 담겨 있어 갱신이 반영되지 않았다.
