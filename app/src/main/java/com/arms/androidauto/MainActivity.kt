@@ -608,11 +608,15 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     // 선택된 채널이 바뀔 때마다 편성 정보 갱신
     LaunchedEffect(selectedStationId) {
         val stationId = selectedStationId ?: return@LaunchedEffect
+        // 채널이 바뀌면 이전 채널의 편성/커버를 먼저 지운다. 조회가 실패했을 때 기존 값을
+        // 유지하는 것은 "같은 채널의 주기 갱신"에서만 맞는 동작이고, 여기서 유지하면 새 채널에
+        // 이전 채널의 프로그램 이미지가 붙는다.
+        nowPlaying = NowPlayingInfo("정보 없음", "정보 없음", null)
         isLoadingMetadata = true
         try {
             repository.fetchMetadata(stationId)?.let { nowPlaying = it }
         } catch (e: Exception) {
-            // 에러 시 기존 값 유지
+            // 조회 실패: 위에서 넣은 "정보 없음"이 남는다. 재생 중이면 30초 주기 갱신이 다시 시도한다.
         } finally {
             isLoadingMetadata = false
         }
