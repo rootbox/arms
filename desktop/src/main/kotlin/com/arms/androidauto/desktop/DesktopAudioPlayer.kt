@@ -40,8 +40,10 @@ class DesktopAudioPlayer : AudioPlayer {
 
     override var repeatMode: Int = 0 // 0 OFF / 1 ONE / 2 ALL (Media3 상수와 동일 의미)
 
+    // libVLC을 찾았는지. 못 찾으면(=VLC 미설치) 재생 요청 시 사용자에게 안내한다.
+    private val libVlcFound: Boolean = NativeDiscovery().discover()
+
     init {
-        NativeDiscovery().discover()
         player.audio().setVolume(70)
         player.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
             override fun playing(mp: MediaPlayer) { onIsPlayingChanged?.invoke(true) }
@@ -57,6 +59,7 @@ class DesktopAudioPlayer : AudioPlayer {
     }
 
     override fun play(streamUrl: String) {
+        if (!ensureLibVlc()) return
         isQueueMode = false
         queue = emptyList(); order = emptyList(); orderPos = -1
         player.media().play(streamUrl)
@@ -64,6 +67,7 @@ class DesktopAudioPlayer : AudioPlayer {
     }
 
     override fun playQueue(items: List<QueueTrack>, startIndex: Int, startPositionMs: Long) {
+        if (!ensureLibVlc()) return
         if (items.isEmpty()) { onPlaybackError?.invoke("재생할 곡이 없습니다."); return }
         queue = items
         isQueueMode = true
@@ -71,6 +75,14 @@ class DesktopAudioPlayer : AudioPlayer {
         order = buildOrder(items.indices.toList(), if (shuffleEnabled) safeStart else -1)
         orderPos = if (shuffleEnabled) 0 else safeStart
         playCurrent(startPositionMs)
+    }
+
+    private fun ensureLibVlc(): Boolean {
+        if (!libVlcFound) {
+            onPlaybackError?.invoke("VLC(미디어 엔진)가 필요합니다. VLC를 설치한 뒤 다시 시도하세요.")
+            return false
+        }
+        return true
     }
 
     private fun buildOrder(indices: List<Int>, firstIndex: Int): List<Int> {

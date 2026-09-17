@@ -1,0 +1,39 @@
+name: Desktop Release
+
+# 데스크톱 태그(desktop-v*, 예: desktop-v1.0.0)를 푸시하면 macOS(.dmg)와 Windows(.msi)를
+# 각 OS 러너에서 빌드해 GitHub Release에 올린다. 안드로이드 릴리즈(v* 태그)와 태그 네임스페이스가
+# 겹치지 않으므로 서로 트리거하지 않는다.
+on:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            task: packageDmg
+            artifact: "desktop/build/compose/binaries/main/dmg/*.dmg"
+          - os: windows-latest
+            task: packageMsi
+            artifact: "desktop/build/compose/binaries/main/msi/*.msi"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin   # Homebrew JDK 경고 회피(정식 배포 벤더)
+          java-version: "17"
+          cache: gradle
+      - name: Build native distribution
+        run: ./gradlew :desktop:${{ matrix.task }}
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+          generate_release_notes: true

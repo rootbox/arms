@@ -105,21 +105,21 @@ desktop           데스크톱 진입점 (신규, main() + 윈도우)
    받아오기.
 - 통과 기준: 두 OS에서 3소스가 소리가 나고 커버 URL이 온다. → 통과하면 Phase 1로.
 
-### Phase 1 — 멀티플랫폼 골격
+### Phase 1 — 멀티플랫폼 골격 ✅ 완료
 - Compose Multiplatform 도입(compose 플러그인 전환), `core/model`·`core/network`를 common으로.
 - `core/playback`·`core/storage` 인터페이스 정의 + 안드로이드 구현을 기존 코드에서 이식.
 - **안드로이드 앱이 그대로 빌드·동작하는지 회귀 확인**(기존 사용자 보호).
 
-### Phase 2 — 데스크톱 재생/저장소 구현
+### Phase 2 — 데스크톱 재생/저장소 구현 ✅ 완료(NAS 라이브 로그인 제외)
 - `desktop` AudioPlayer(VLCJ), CredentialStore(키체인), PlaylistStore(SQLite).
 - 헤드리스 수준에서 3소스 재생 + NAS 로그인/곡목록/플레이리스트 CRUD 확인.
 
-### Phase 3 — 데스크톱 UI
+### Phase 3 — 데스크톱 UI ✅ 완료(화면 캡처는 미검증)
 - 공통 Compose UI를 데스크톱 창에 띄우기. `Context`/`Intent`/`getSystemService` 의존부를 플랫폼
   추상화로 대체. 라디오/K-POP/NAS 화면, 미니플레이어, 전체화면 플레이어, 커버 재시도.
 - 데스크톱에 맞는 창 크기/키보드/미디어키(선택) 대응.
 
-### Phase 4 — 패키징/배포
+### Phase 4 — 패키징/배포 ✅ macOS 실증(.dmg 생성·부팅 확인)
 - Compose Desktop `packageDmg`/`packageMsi`. 아이콘·앱 이름.
 - 서명/공증(결정 4)에 따라 처리. GitHub Actions에 mac+win 러너로 빌드 매트릭스 추가.
 
@@ -137,6 +137,10 @@ desktop           데스크톱 진입점 (신규, main() + 윈도우)
 | macOS 공증/Windows 서명 비용 | 낮~중 | 개인용은 경고 감수 배포 가능(결정 4) |
 | OkHttp를 common으로 못 옮김(순수 KMP화 시) | 낮 | 데스크톱도 JVM이라 OkHttp 그대로 사용 가능. Ktor 전환은 선택 |
 | 라디오 비공식 API 변경 | 상존 | 안드로이드와 코드 공유라 한 번 고치면 양쪽 반영(오히려 이득) |
+
+> **libVLC 번들(Phase 4b, 후속)**: 현재 배포본은 재생 엔진(libVLC)을 포함하지 않아 실행 기기에
+> VLC가 설치돼 있어야 한다(미설치 시 앱은 뜨고 재생에서 안내). "다운로드 후 바로 실행"을 원하면
+> VLC 라이브러리+플러그인을 앱 번들에 포함하는 작업이 필요하다(용량↑, OS별 검증 필요).
 
 ## 6. 규모(개략)
 - Phase 0: 작음(1~2일). **여기서 방향이 확정된다.**
