@@ -7,20 +7,22 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.arms.androidauto.core.playback.AudioPlayer
+import com.arms.androidauto.core.playback.QueueTrack
 
-class MediaPlayer(private val context: Context) {
+class MediaPlayer(private val context: Context) : AudioPlayer {
     private var player: ExoPlayer? = null
 
     // 재생 실패(네트워크 오류 등) 시 호출되는 콜백. UI에서 사용자에게 실패를 알리는 데 사용.
-    var onPlaybackError: ((String) -> Unit)? = null
+    override var onPlaybackError: ((String) -> Unit)? = null
 
     // 이전/다음 곡 이동은 Compose State를 거치지 않고 ExoPlayer 내부에서 바로 일어나므로,
     // UI가 현재 곡 제목/앨범아트를 갱신하려면 이 콜백으로 트랙 전환을 알려줘야 한다.
-    var onTrackChanged: ((title: String?, artworkUri: String?) -> Unit)? = null
+    override var onTrackChanged: ((title: String?, artworkUri: String?) -> Unit)? = null
 
     // 재생/일시정지 상태를 UI가 직접 토글해서 들고 있으면, 버퍼링·오디오 포커스 상실·에러처럼
     // 플레이어 쪽에서 먼저 멈추는 경우와 어긋난다. 실제 상태를 그대로 전달받는다.
-    var onIsPlayingChanged: ((Boolean) -> Unit)? = null
+    override var onIsPlayingChanged: ((Boolean) -> Unit)? = null
 
     init {
         // ExoPlayer 초기화. Android Context가 없으면 이 부분에서 문제 발생 가능.
@@ -58,7 +60,7 @@ class MediaPlayer(private val context: Context) {
         }
     }
 
-    fun play(streamUrl: String) {
+    override fun play(streamUrl: String) {
         player?.let {
             val mediaItem = MediaItem.fromUri(streamUrl)
             it.setMediaItem(mediaItem)
@@ -69,20 +71,10 @@ class MediaPlayer(private val context: Context) {
         }
     }
 
-    // playQueue에 넘길 곡 하나. 제목만이 아니라 아티스트/앨범/커버까지 실어야
-    // 미니플레이어·잠금화면·알림에 곡 정보와 앨범 아트가 함께 표시된다.
-    data class QueueTrack(
-        val title: String,
-        val url: String,
-        val artworkUri: String? = null,
-        val artist: String? = null,
-        val album: String? = null
-    )
-
     // NAS 재생목록처럼 여러 곡을 순서대로 재생할 때 사용. 실시간 라디오와 달리 진짜 트랙
     // 탐색(이전/다음/진행바)이 의미가 있으므로, ExoPlayer의 기본 재생목록 기능을 그대로 쓴다.
     // startPositionMs는 앱 재시작 후 "이어듣기"에서 마지막 위치부터 재생을 재개할 때 쓴다.
-    fun playQueue(items: List<QueueTrack>, startIndex: Int = 0, startPositionMs: Long = 0L) {
+    override fun playQueue(items: List<QueueTrack>, startIndex: Int, startPositionMs: Long) {
         player?.let {
             val mediaItems = items.map { track ->
                 val metadata = androidx.media3.common.MediaMetadata.Builder()
@@ -105,41 +97,41 @@ class MediaPlayer(private val context: Context) {
     }
 
     // 이어듣기 저장용. 현재 재생 중인 큐 내 트랙 위치(0-기반). 큐가 없으면 0.
-    fun currentTrackIndex(): Int = player?.currentMediaItemIndex ?: 0
+    override fun currentTrackIndex(): Int = player?.currentMediaItemIndex ?: 0
 
-    fun nextTrack() { player?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() } }
-    fun previousTrack() { player?.let { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() } }
+    override fun nextTrack() { player?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() } }
+    override fun previousTrack() { player?.let { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() } }
 
     // NAS 재생목록처럼 큐 위치가 있는 재생의 진짜 일시정지/재개. 실시간 라디오에는 쓰지 않는다.
-    fun pause() { player?.pause() }
-    fun resume() { player?.play() }
+    override fun pause() { player?.pause() }
+    override fun resume() { player?.play() }
 
     // 진행바용. 라디오(실시간 스트림)는 duration이 없으므로 0을 돌려준다.
-    fun currentPositionMs(): Long = player?.currentPosition ?: 0L
+    override fun currentPositionMs(): Long = player?.currentPosition ?: 0L
 
-    fun durationMs(): Long {
+    override fun durationMs(): Long {
         val duration = player?.duration ?: C.TIME_UNSET
         return if (duration == C.TIME_UNSET) 0L else duration
     }
 
-    fun seekTo(positionMs: Long) { player?.seekTo(positionMs) }
+    override fun seekTo(positionMs: Long) { player?.seekTo(positionMs) }
 
     // 셔플/반복은 ExoPlayer가 큐 순서를 직접 관리하므로 그대로 위임하면 된다.
-    var shuffleEnabled: Boolean
+    override var shuffleEnabled: Boolean
         get() = player?.shuffleModeEnabled ?: false
         set(value) { player?.shuffleModeEnabled = value }
 
     // Player.REPEAT_MODE_OFF / REPEAT_MODE_ONE / REPEAT_MODE_ALL
-    var repeatMode: Int
+    override var repeatMode: Int
         get() = player?.repeatMode ?: Player.REPEAT_MODE_OFF
         set(value) { player?.repeatMode = value }
 
-    fun stop() {
+    override fun stop() {
         player?.stop()
     }
 
     // 액티비티 종료 시 자원 해제. stop()과 분리하여, stop() 이후에도 재생을 재개할 수 있도록 함.
-    fun release() {
+    override fun release() {
         player?.release()
         player = null
     }

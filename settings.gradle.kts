@@ -33,5 +33,6 @@ rootProject.name = "ARMSAndroidAuto"
 include(":app")
 include(":core:model")
 include(":core:network")
+include(":core:playback")
 include(":core:media")
 include(":core:data")

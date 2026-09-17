@@ -62,6 +62,7 @@ import com.arms.androidauto.core.data.PlaybackStateStore
 import com.arms.androidauto.core.data.NowPlayingInfo
 import com.arms.androidauto.core.data.StationRepository
 import com.arms.androidauto.core.media.MediaPlayer
+import com.arms.androidauto.core.playback.QueueTrack
 import com.arms.androidauto.core.model.NasAlbum
 import com.arms.androidauto.core.data.NasPlaylistRepository
 import com.arms.androidauto.core.model.NasPlaylist
@@ -402,7 +403,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                 val safeIndex = startIndex.coerceIn(0, tracks.lastIndex)
                 player.playQueue(
                     tracks.map { track ->
-                        MediaPlayer.QueueTrack(
+                        QueueTrack(
                             title = track.song.title,
                             url = track.streamUrl,
                             artworkUri = track.artworkUrl,

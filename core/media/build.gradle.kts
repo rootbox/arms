@@ -17,7 +17,8 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":core:model")) // 추후 필요 시 추가
+    implementation(project(":core:model"))
+    api(project(":core:playback"))
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
     implementation("androidx.media3:media3-session:1.3.1")
