@@ -276,16 +276,32 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
     var isDownloadingUpdate by remember { mutableStateOf(false) }
     val currentVersionName = remember { updateChecker.currentVersionName() }
     var lastCheckedAtMillis by remember { mutableStateOf(updateChecker.lastCheckedAtMillis()) }
+    var lastCheckError by remember { mutableStateOf(updateChecker.lastCheckError()) }
 
-    // 케이블/adb 없이도 새 버전을 알 수 있도록, 앱을 열 때마다 GitHub Releases를 조용히 확인한다.
-    // 새 버전이 없으면 아무 것도 표시하지 않고, 있을 때만 배너로 안내한다.
-    LaunchedEffect(Unit) {
-        try {
-            availableUpdate = updateChecker.checkForUpdate()
-            lastCheckedAtMillis = updateChecker.lastCheckedAtMillis()
-        } catch (e: Exception) {
-            // 업데이트 확인 실패는 조용히 무시 (다음 실행 때 다시 시도)
+    // 케이블/adb 없이도 새 버전을 알 수 있도록 GitHub Releases를 조용히 확인한다. 예전엔 콜드
+    // 스타트에만 확인해서, 앱을 켜 둔 채 며칠이 지나면 새 버전이 나와도 배너가 뜨지 않았다.
+    // 포그라운드에 올 때마다 확인하되(1시간 스로틀은 UpdateChecker가 담당), 건너뛴 경우엔
+    // 기존 배너 상태를 건드리지 않는다.
+    val updateLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(updateLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                coroutineScope.launch {
+                    try {
+                        when (val outcome = updateChecker.checkIfDue()) {
+                            is UpdateCheckOutcome.Checked -> availableUpdate = outcome.update
+                            UpdateCheckOutcome.Skipped -> Unit
+                        }
+                    } catch (e: Exception) {
+                        // 확인 실패 사유는 UpdateChecker가 기록하고 footer에 표시된다.
+                    }
+                    lastCheckedAtMillis = updateChecker.lastCheckedAtMillis()
+                    lastCheckError = updateChecker.lastCheckError()
+                }
+            }
         }
+        updateLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { updateLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // DB의 방송국 목록 관찰 (Flow -> State)
@@ -810,6 +826,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: MediaPlayer) {
                         playingStationId = playingStationId,
                         currentVersionName = currentVersionName,
                         lastCheckedAtMillis = lastCheckedAtMillis,
+                        lastCheckError = lastCheckError,
                         onStationClick = { playStation(it) }
                     )
                     else -> when (val screen = nasScreen) {
@@ -992,6 +1009,7 @@ private fun RadioTabContent(
     playingStationId: String?,
     currentVersionName: String,
     lastCheckedAtMillis: Long?,
+    lastCheckError: String?,
     onStationClick: (Station) -> Unit
 ) {
     LazyColumn(
@@ -1011,6 +1029,8 @@ private fun RadioTabContent(
                 val fmt = java.text.SimpleDateFormat("M월 d일 HH:mm", java.util.Locale.KOREA)
                 "마지막 업데이트 확인: ${fmt.format(java.util.Date(it))}"
             } ?: "업데이트 확인 안 됨"
+            // 실패가 무음이면 "확인 안 됨"이 네트워크 문제인지 한도 초과인지 알 수 없다. 사유를 보인다.
+            val checkErrorText = lastCheckError?.let { "확인 실패: $it" }
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1030,6 +1050,14 @@ private fun RadioTabContent(
                     color = SpotifyTextMuted.copy(alpha = 0.35f),
                     textAlign = TextAlign.Center
                 )
+                checkErrorText?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SpotifyTextMuted.copy(alpha = 0.35f),
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
         }
     }

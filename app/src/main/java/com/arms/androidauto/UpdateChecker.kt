@@ -14,6 +14,30 @@ import java.io.IOException
 
 data class UpdateInfo(val versionName: String, val downloadUrl: String)
 
+// 확인을 실제로 수행했는지(Checked) 아니면 스로틀로 건너뛰었는지(Skipped). 건너뛴 경우
+// 호출부가 기존 배너 상태를 지우지 않도록 구분한다.
+sealed class UpdateCheckOutcome {
+    data class Checked(val update: UpdateInfo?) : UpdateCheckOutcome()
+    object Skipped : UpdateCheckOutcome()
+}
+
+// 확인 주기·실패 분류 정책. 순수 함수로 두어 단위 테스트한다.
+internal object UpdateCheckPolicy {
+    const val MIN_INTERVAL_MS = 60L * 60L * 1000L // 1시간
+
+    // 앱을 켠 채로 오래 두면 예전엔 재확인이 전혀 없었다(콜드 스타트에만 확인). 포그라운드에
+    // 올 때마다 부르되, GitHub 비인증 한도(IP당 60회/시)를 아끼려 1시간 안에는 다시 묻지 않는다.
+    fun shouldCheck(nowMs: Long, lastAttemptMs: Long?): Boolean =
+        lastAttemptMs == null || nowMs - lastAttemptMs >= MIN_INTERVAL_MS
+
+    // 예전엔 실패가 무음이라 "확인 안 됨"만 남았다. 사용자가 footer에서 사유를 볼 수 있게 한다.
+    fun describeFailure(httpCode: Int, rateLimitRemaining: String?): String = when {
+        httpCode == 403 && rateLimitRemaining == "0" -> "GitHub 확인 한도 초과 (잠시 후 자동 재시도)"
+        httpCode == 404 -> "릴리즈 정보를 찾을 수 없음"
+        else -> "서버 응답 $httpCode"
+    }
+}
+
 // GitHub Releases를 통해 케이블/adb 없이 새 버전을 확인하고 설치할 수 있게 한다.
 // 릴리스 태그는 "v<versionCode>" 형식이어야 하며(예: v3), APK 에셋이 첨부되어 있어야 한다.
 class UpdateChecker(private val context: Context) {
@@ -32,7 +56,24 @@ class UpdateChecker(private val context: Context) {
         return if (value > 0) value else null
     }
 
+    // 마지막 확인이 실패했다면 그 사유. 성공하면 지워진다.
+    fun lastCheckError(): String? = prefs.getString(KEY_LAST_ERROR, null)
+
+    // 포그라운드 진입마다 부르는 진입점. 1시간 안에 이미 시도했으면 건너뛴다.
+    suspend fun checkIfDue(): UpdateCheckOutcome {
+        val lastAttempt = prefs.getLong(KEY_LAST_ATTEMPT_AT, -1L).takeIf { it > 0 }
+        if (!UpdateCheckPolicy.shouldCheck(System.currentTimeMillis(), lastAttempt)) {
+            return UpdateCheckOutcome.Skipped
+        }
+        return UpdateCheckOutcome.Checked(checkForUpdate())
+    }
+
+    private fun recordFailure(reason: String) {
+        prefs.edit().putString(KEY_LAST_ERROR, reason).apply()
+    }
+
     suspend fun checkForUpdate(): UpdateInfo? = withContext(Dispatchers.IO) {
+        prefs.edit().putLong(KEY_LAST_ATTEMPT_AT, System.currentTimeMillis()).apply()
         try {
             val request = Request.Builder()
                 .url(latestReleaseUrl)
@@ -41,8 +82,16 @@ class UpdateChecker(private val context: Context) {
                 .build()
 
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                prefs.edit().putLong(KEY_LAST_CHECKED_AT, System.currentTimeMillis()).apply()
+                if (!response.isSuccessful) {
+                    recordFailure(
+                        UpdateCheckPolicy.describeFailure(response.code, response.header("X-RateLimit-Remaining"))
+                    )
+                    return@withContext null
+                }
+                prefs.edit()
+                    .putLong(KEY_LAST_CHECKED_AT, System.currentTimeMillis())
+                    .remove(KEY_LAST_ERROR)
+                    .apply()
                 val json = JSONObject(response.body?.string() ?: return@withContext null)
                 val tagName = json.optString("tag_name")
                 val remoteVersionCode = Regex("v(\\d+)").find(tagName)?.groupValues?.get(1)?.toIntOrNull()
@@ -61,6 +110,7 @@ class UpdateChecker(private val context: Context) {
                 apkUrl?.let { url -> UpdateInfo(json.optString("name").ifBlank { tagName }, url) }
             }
         } catch (e: Exception) {
+            recordFailure("네트워크 오류")
             null
         }
     }
@@ -105,5 +155,7 @@ class UpdateChecker(private val context: Context) {
 
     private companion object {
         const val KEY_LAST_CHECKED_AT = "last_checked_at"
+        const val KEY_LAST_ATTEMPT_AT = "last_attempt_at"
+        const val KEY_LAST_ERROR = "last_error"
     }
 }
