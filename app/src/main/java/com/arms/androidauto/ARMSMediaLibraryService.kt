@@ -172,6 +172,13 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 커버 재시도 상태. 편성/곡 정보가 그대로여도 커버만 못 받은 경우가 있어서(이동 중 순간 끊김
     // 등), 그때는 커버만 따로 다시 받는다. 예전에는 정보가 안 바뀌면 그대로 return해버려서
     // 한 번 실패한 커버가 편성/곡이 바뀔 때까지 회색으로 남았다.
+    // 마지막으로 세션에 반영한 편성/곡 정보. "바뀌었는가"는 세션 메타데이터의 특정 필드가 아니라
+    // 이 값과 비교한다(표시 형식을 바꿔도 감지가 깨지지 않도록). 스트리밍 채널은 title=곡,
+    // subtitle=채널명이라 예전 방식(subtitle과 비교)으로는 같은 곡인데도 매 주기 "변경"으로 판정됐다.
+    private var appliedStationId: String? = null
+    private var appliedProgramTitle: String? = null
+    private var appliedCurrentSong: String? = null
+
     private var artworkRetryStationId: String? = null
     private var artworkRetryAttempt = 0
     private var artworkNextRetryAtMs = 0L
@@ -661,8 +668,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         val nowPlaying = withContext(Dispatchers.IO) { stationRepository.fetchMetadata(stationId) }
             ?: return
 
-        val unchanged = nowPlaying.programTitle == currentItem.mediaMetadata.subtitle?.toString() &&
-            nowPlaying.currentSong == currentItem.mediaMetadata.artist?.toString()
+        val unchanged = appliedStationId == stationId &&
+            appliedProgramTitle == nowPlaying.programTitle &&
+            appliedCurrentSong == nowPlaying.currentSong
         val imageUrl = nowPlaying.imageUrl
 
         if (unchanged) {
@@ -715,8 +723,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 교체 기반도 조회 시작 때 잡아둔 currentItem이 아니라 지금의 현재 항목을 쓴다.
         if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
         val latest = player.currentMediaItem ?: return
+        val station = stationRepository.getAllStations().first().find { it.id == stationId }
         val updatedMetadata = latest.mediaMetadata.buildUpon()
-            .apply { if (streamingStation != null) setTitle(nowPlaying.programTitle) }
+            .setTitle(
+                if (streamingStation != null) nowPlaying.programTitle
+                else RadioDisplayPolicy.sessionTitle(station?.name ?: latest.mediaMetadata.title?.toString().orEmpty(), nowPlaying.programTitle)
+            )
             .setSubtitle(streamingStation?.name ?: nowPlaying.programTitle)
             .setArtist(streamingStation?.name ?: nowPlaying.currentSong)
             .setArtworkUri(artworkUri)
@@ -725,6 +737,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         val updatedItem = latest.buildUpon().setMediaMetadata(updatedMetadata).build()
         android.util.Log.d("ARMS", "정보 갱신 반영 $stationId: ${nowPlaying.programTitle}")
         player.replaceMediaItem(player.currentMediaItemIndex, updatedItem)
+        appliedStationId = stationId
+        appliedProgramTitle = nowPlaying.programTitle
+        appliedCurrentSong = nowPlaying.currentSong
     }
 
     // < / > (이전/다음) 버튼 입력을 실제 트랙이 아닌 '채널 전환'으로 처리한다.
@@ -760,6 +775,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     // 브라우징용 부제("일반 주파수")가 잠깐 노출되지 않도록 비워 둔다. 갱신 루프가 곧 채운다.
                     .setMediaMetadata(createPlayableItem(nextStation).mediaMetadata.buildUpon().setSubtitle(null).build())
                     .build()
+                appliedStationId = null
                 player.setMediaItem(quickItem)
                 player.prepare()
                 player.play()
@@ -789,9 +805,16 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         artworkUri?.let { grantArtworkUriToAllControllers(it) }
 
         val isStreaming = station.type == com.arms.androidauto.core.model.StationType.STREAMING
+        appliedStationId = station.id
+        appliedProgramTitle = nowPlaying?.programTitle
+        appliedCurrentSong = nowPlaying?.currentSong
         val metadata = MediaMetadata.Builder()
-            // 스트리밍 채널은 곡이 title(블루투스 화면에 보이는 자리), 채널명은 subtitle/artist
-            .setTitle(if (isStreaming) (nowPlaying?.programTitle ?: station.name) else station.name)
+            // 스트리밍 채널은 곡이 title(블루투스 화면에 보이는 자리), 채널명은 subtitle/artist.
+            // 지상파는 "SBS 파워FM - 황제성의 황제파워"처럼 채널과 프로그램을 title 한 줄에.
+            .setTitle(
+                if (isStreaming) (nowPlaying?.programTitle ?: station.name)
+                else RadioDisplayPolicy.sessionTitle(station.name, nowPlaying?.programTitle)
+            )
             .setSubtitle(if (isStreaming) station.name else (nowPlaying?.programTitle ?: "정보 없음"))
             .setArtist(if (isStreaming) station.name else (nowPlaying?.currentSong ?: "정보 없음"))
             .setIsBrowsable(false)

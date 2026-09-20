@@ -1253,7 +1253,10 @@ private fun MiniPlayerBar(
             // 음악 스트리밍 채널은 곡("아티스트 - 제목")이 헤드라인, 지상파는 기존 문구 유지
             title = if (playback.station.type == StationType.STREAMING) {
                 playback.nowPlaying.programTitle.ifBlank { playback.station.name }
-            } else playback.nowPlaying.currentSong.ifBlank { playback.station.name }
+            } else RadioDisplayPolicy.miniPlayerTitle(
+                playback.nowPlaying.programTitle,
+                fallback = playback.nowPlaying.currentSong.ifBlank { playback.station.name }
+            )
             subtitle = playback.station.name
             imageUrl = playback.nowPlaying.imageUrl
         }
