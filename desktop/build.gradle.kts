@@ -38,3 +38,9 @@ compose.desktop {
         }
     }
 }
+
+// 헤드리스 재생 스모크(창 없이 5개 채널을 VLCJ로 실제 재생). `./gradlew :desktop:smoke`
+tasks.register<JavaExec>("smoke") {
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("com.arms.androidauto.desktop.SmokeKt")
+}

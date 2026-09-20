@@ -11,7 +11,7 @@ fun main() {
     player.onIsPlayingChanged = { lastPlaying = it }
     player.onPlaybackError = { println("SMOKE_ERR $it") }
 
-    for ((id, name) in listOf("1" to "KBS", "2" to "SBS", "3" to "KPOP")) {
+    for ((id, name) in listOf("1" to "KBS", "2" to "SBS", "3" to "KPOP", "4" to "BALLAD", "5" to "REWIND")) {
         val meta = api.getStationMetadata(id)
         val url = api.getPlaybackUrl(id) ?: meta?.streamUrl
         if (url.isNullOrBlank()) { println("SMOKE [$name] no-url"); continue }
@@ -25,4 +25,6 @@ fun main() {
     }
     player.release()
     println("SMOKE done")
+    // VLCJ/AWT 비데몬 스레드가 남아 JVM이 안 내려갈 수 있어 명시적으로 종료한다.
+    kotlin.system.exitProcess(0)
 }

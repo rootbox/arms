@@ -205,6 +205,19 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
 
     private val streamUserAgent = "SimpleRadio (ExoPlayerLib/1.3.1)"
 
+    // 스트림 요청 전용 클라이언트. 공용 클라이언트의 HttpLoggingInterceptor(BODY)는 응답 본문을
+    // 끝까지 읽어 로그로 남기려 하는데, 오디오 스트림은 끝이 없어 영원히 블록된다(데스크톱 스모크가
+    // 발라드 채널에서 멈춘 원인). 로깅 인터셉터를 떼고 타임아웃을 짧게 둔다.
+    private val streamClient: OkHttpClient by lazy {
+        client.newBuilder().apply {
+            interceptors().removeAll { it is okhttp3.logging.HttpLoggingInterceptor }
+            networkInterceptors().removeAll { it is okhttp3.logging.HttpLoggingInterceptor }
+            connectTimeout(5, TimeUnit.SECONDS)
+            readTimeout(8, TimeUnit.SECONDS)
+            callTimeout(15, TimeUnit.SECONDS)
+        }.build()
+    }
+
     // 죽은 스트림 감지: 200 + audio/* 인 첫 후보를 쓴다. 전부 죽었으면 1차 URL을 돌려
     // 플레이어의 오류 경로가 사용자에게 알리게 한다. 후보가 하나면 확인할 것이 없고,
     // 메타데이터는 8초마다 폴링되므로 선택 결과를 5분간 기억해 매번 두드리지 않는다.
@@ -220,7 +233,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
 
     private fun isStreamAlive(url: String): Boolean = try {
         val request = Request.Builder().url(url).header("User-Agent", streamUserAgent).build()
-        client.newCall(request).execute().use { r ->
+        streamClient.newCall(request).execute().use { r ->
             r.isSuccessful && (r.header("Content-Type")?.startsWith("audio/") == true)
         }
     } catch (e: Exception) { false }
@@ -241,7 +254,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
             .header("User-Agent", streamUserAgent)
             .header("Icy-MetaData", "1")
             .build()
-        client.newCall(request).execute().use { r ->
+        streamClient.newCall(request).execute().use { r ->
             if (!r.isSuccessful) return null
             val stationName = cleanIcyName(r.header("icy-name"))
             val metaint = r.header("icy-metaint")?.trim()?.toIntOrNull()
