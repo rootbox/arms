@@ -709,14 +709,21 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 지상파 라디오는 기존대로 title=채널명, subtitle=프로그램.
         val streamingStation = stationRepository.getAllStations().first()
             .find { it.id == stationId }?.takeIf { it.type == com.arms.androidauto.core.model.StationType.STREAMING }
-        val updatedMetadata = currentItem.mediaMetadata.buildUpon()
+
+        // 커버를 받는 동안(수 초) 채널이 바뀌었을 수 있다. 여기서 다시 확인하지 않으면 방금 전환된
+        // 새 채널 항목을 옛 채널 항목으로 덮어써 "버튼을 눌렀는데 채널이 되돌아오는" 일이 생긴다.
+        // 교체 기반도 조회 시작 때 잡아둔 currentItem이 아니라 지금의 현재 항목을 쓴다.
+        if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
+        val latest = player.currentMediaItem ?: return
+        val updatedMetadata = latest.mediaMetadata.buildUpon()
             .apply { if (streamingStation != null) setTitle(nowPlaying.programTitle) }
             .setSubtitle(streamingStation?.name ?: nowPlaying.programTitle)
             .setArtist(streamingStation?.name ?: nowPlaying.currentSong)
             .setArtworkUri(artworkUri)
             .build()
 
-        val updatedItem = currentItem.buildUpon().setMediaMetadata(updatedMetadata).build()
+        val updatedItem = latest.buildUpon().setMediaMetadata(updatedMetadata).build()
+        android.util.Log.d("ARMS", "정보 갱신 반영 $stationId: ${nowPlaying.programTitle}")
         player.replaceMediaItem(player.currentMediaItemIndex, updatedItem)
     }
 
