@@ -2,7 +2,7 @@
 
 > 이 문서는 앱 개발을 일단락하며 정리한 **최종본**입니다. 무엇을 만들었고, 왜 그렇게 만들었고,
 > 실전에서 무엇이 깨졌고 어떻게 고쳤는지를 한 곳에 모았습니다.
-> 기준 시점: **2026-09-17 / v0.6.10 (versionCode 18)**
+> 기준 시점: **2026-09-20 / v0.7.0-rc9 (versionCode 20, 정식 발행은 실차 검증 후)**
 
 ---
 
@@ -25,8 +25,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | v0.6.10 (versionCode 18) |
-| 코드 규모 | 소스 30개 파일 / 약 6,300줄, 테스트 9개 파일(39건) |
+| 버전 | v0.7.0-rc9 (versionCode 20) — 정식 v20은 실차(MINI 블루투스·AA 회귀) 검증 후 |
+| 코드 규모 | 안드로이드 소스 약 6,600줄 + 데스크톱 모듈, 안드로이드 단위 테스트 61건(+데스크톱 5건) |
 | 최소/타깃 SDK | 26 / 35 |
 | 릴리즈 APK | 약 13.6MB (서명된 release 빌드) |
 | 배포 | GitHub Releases + 인앱 업데이트 |
@@ -38,26 +38,30 @@
 ## 3. 아키텍처
 
 ```
-app/                    Compose UI + Android Auto 미디어 서비스
+app/                    Compose UI + 미디어 서비스(차량·블루투스·폰 공용)
 ├── MainActivity.kt              폰 화면 전체 (탭, 미니플레이어, 전체화면 플레이어)
-├── ARMSMediaLibraryService.kt   차량용 MediaLibraryService (브라우징 + 재생 + 세션)
+├── SessionAudioPlayer.kt        폰 화면 → 서비스 세션 컨트롤러 (AudioPlayer 구현)
+├── ARMSMediaLibraryService.kt   MediaLibraryService (브라우징 + 재생 + 세션). 플레이어는 여기 하나뿐
 ├── UpdateChecker.kt             GitHub Releases 기반 인앱 업데이트
 ├── auto/                        차량 전용 (MediaId 스킴, NAS 브라우즈 트리)
 └── ui/nas|theme/                NAS 화면들, 디자인 토큰
 
 core/model      순수 데이터 모델 (Station, NasAlbum, NasSong, NasTrack, NasPlaylist)
-core/network    외부 API (JVM 모듈): RadioApi, SynologyMusicApi, NetworkClient
-core/media      MediaPlayer — 폰 화면 전용 ExoPlayer 래퍼
-core/data       저장소 계층: Room DB 2개, 암호화 자격증명, 재생 상태
+core/network    외부 API (JVM 모듈): RadioApi(ICY·Deezer 포함), SynologyMusicApi, NetworkClient
+core/playback   AudioPlayer 인터페이스 + QueueTrack (플랫폼 독립, 데스크톱과 공유)
+core/data       저장소 계층: Room DB 2개, 암호화 자격증명, 재생 상태, 채널 아트
+desktop/        macOS/Windows 앱 (Compose for Desktop + VLCJ) — docs/DESKTOP_PORT_PLAN.md
 ```
 
-### 플레이어가 둘인 이유 (중요)
+### 플레이어는 하나다 (0.7.0에서 바뀐 것 — 중요)
 
-- **폰 화면**은 `core/media`의 `MediaPlayer`(자체 ExoPlayer)를 직접 씁니다.
-- **차량**은 `ARMSMediaLibraryService`의 별도 ExoPlayer를 씁니다.
-
-둘은 **완전히 분리**돼 있습니다. 이 사실이 여러 버그의 판단 근거가 됩니다 —
-예컨대 "차량 연결이 끊기면 서비스 쪽 재생을 멈춰도 폰 재생에는 영향이 없다"가 성립합니다.
+0.6.x까지는 폰 화면이 자체 ExoPlayer(`core/media`)로, 차량은 서비스의 ExoPlayer로 **따로**
+재생했습니다. 그 분리는 Android Auto에서는 장점이었지만(연결 해제 격리), **블루투스만으로
+쓰는 차량에서는 근본 원인**이었습니다 — 폰 재생에 MediaSession이 없어 차량이 곡 정보를 받지도,
+이전/다음 버튼을 보내지도 못했습니다(§6.12). 0.7.0부터 폰 화면은 `SessionAudioPlayer`로 서비스
+세션의 컨트롤러가 되고, 라디오/NAS를 **mediaId로 요청**해 차량과 같은 경로를 탑니다.
+서비스는 재생을 차량이 시작했는지(`playbackInitiatedByCar`)를 기억해, Android Auto 해제 시
+정지·포커스 재개 포기·낡은 큐 폐기를 차량 시작 재생에만 적용합니다(`BluetoothModePolicy`).
 
 ### 저장소가 둘인 이유
 
@@ -76,6 +80,9 @@ core/data       저장소 계층: Room DB 2개, 암호화 자격증명, 재생 �
 
 ### 라디오
 - KBS Cool FM(89.1) / SBS 파워FM(107.7) / K-POP 24/7 (LISTEN.moe)
+- **K-POP 발라드 24/7** (sCast.kr Naya Ballad → laut.fm Kpop Love 폴백) / **K-POP 2세대 히트 24/7**
+  (Zeno.FM Kpop Rewind). 곡 정보는 스트림의 ICY 메타데이터, 커버는 Deezer 엄격 일치 → 없으면
+  번들 채널 아트. "80/90년대 가요" 전용 공개 스트림은 2026-09 실측에서 없었음.
 - 실제 편성 정보와 프로필·커버 이미지를 갱신 (차량 8초 / 폰 30초 주기). 커버를 못 받으면 백오프로 다시 시도
 - 즐겨찾기, 마지막 채널 자동 재개
 - 이전/다음 버튼 = **채널 전환** (실시간 방송엔 "다음 트랙"이 없으므로)
@@ -87,6 +94,13 @@ core/data       저장소 계층: Room DB 2개, 암호화 자격증명, 재생 �
 - 앨범 아트, 아티스트/앨범 메타데이터
 - 셔플 / 반복(끄기·전체·한 곡), 진행바 탐색
 - **이어듣기** — 앱을 껐다 켜도 마지막 트랙·재생 위치에서 재개
+
+### 블루투스 모드 (Android Auto 없이)
+- 폰에서 재생을 시작하면 세션을 통해 차량이 곡 정보를 받고 이전/다음(=채널 전환) 버튼이 동작
+- 블루투스 끊김: 라디오 정지(큐 비움) / NAS 일시정지. 재연결·시동 시 헤드유닛 PLAY로 재개
+  (`MediaButtonReceiver` + `onPlaybackResumption`, 프로세스가 죽어 있어도 동작)
+- 잠금화면/알림 미디어 컨트롤, 앱을 닫아도 재생 유지
+- 계획·검증 기록: `docs/BLUETOOTH_MODE_PLAN.md`
 
 ### 차량 (Android Auto)
 - 브라우징 루트: 최근 재생한 앨범 / 플레이리스트 / 아티스트 / 라디오
@@ -186,6 +200,33 @@ SSE 메타데이터에는 커버가 없어 곡 제목으로 GraphQL을 **검색*
 (`wss://listen.moe/kpop/gateway_v2`, 공식 3rd-party API)는 같은 곡의 곡·아티스트·커버를 한 번에
 줍니다. → 게이트웨이를 1차로 쓰고(접속 직후 첫 TRACK_UPDATE만 받고 종료), 옛 경로는 폴백.
 
+### 6.12 블루투스만 쓰는 차량에서 곡 정보·버튼·재개가 전부 안 되던 이유 (2026-09-20)
+증상 넷(정보 미노출·이전/다음 무반응·끊겨도 계속 재생·재연결 시 미재개)의 원인은 하나였습니다.
+**폰 화면의 재생이 MediaSession 없는 자체 ExoPlayer로 돌아** OS와 차량이 그 재생을 볼 수 없었던
+것(`dumpsys media_session`에 우리 세션이 없고 "Audio playback" 목록에만 등장). → 폰 재생을 서비스
+세션으로 통합(§3). 함께 필요했던 조각: `MediaButtonReceiver` 선언(프로세스가 죽은 뒤 PLAY를 받아
+서비스를 깨움), `setHandleAudioBecomingNoisy`, 컨트롤러가 요청 목록 기준으로 startIndex를 검증해
+던지는 `IllegalSeekPositionException`(시작 위치는 요청 메타데이터로 보내 서비스가 결정).
+
+### 6.13 모듈을 지웠더니 라디오가 안 나옴 — 런타임 전이 의존성
+`core/media`를 지우자 그 모듈이 implementation으로 물고 있던 `media3-exoplayer-hls`가 APK에서
+함께 빠졌습니다. 앱은 그 모듈을 직접 선언한 적이 없어 **컴파일은 통과**했고, 실행 중 HLS 항목을
+setMediaItem하는 순간 `No suitable media source factory found for content type: 2`가 났습니다
+(rc4~rc7). dex에서 `HlsMediaSource` 참조 수를 세어 확정했습니다. → 모듈을 지울 땐 그 모듈이
+런타임에 전이시키던 의존성을 확인하고, **라디오(HLS)와 스트리밍(MP3) 양쪽을 실기기에서 재생**할 것.
+
+### 6.14 채널 전환이 되돌아오던 레이스
+편성 갱신 루프는 조회 시작 때의 항목을 기반으로 `replaceMediaItem`을 했는데, 커버 다운로드(수 초)
+뒤 교체 직전에 "채널이 아직 그대로인가"를 다시 보지 않았습니다. 그 사이 버튼으로 채널이 바뀌면
+새 항목이 옛 항목으로 덮였습니다. → 교체 직전 재확인 + 현재 항목 기반 교체. 채널 전환도 편성·
+커버를 다 받은 뒤가 아니라 **새 URL로 먼저 전환하고 정보는 나중에** 채우도록 바꿨습니다.
+
+### 6.15 스트림에 매달린 로깅 인터셉터
+`HttpLoggingInterceptor(Level.BODY)`는 응답 본문을 끝까지 읽어 로그로 남깁니다. 오디오 스트림은
+끝이 없어 ICY 메타데이터/생존 확인 요청이 영원히 블록됐습니다(jstack으로 확인). 인터셉터 없는
+`OkHttpClient()`로 한 사전 검증은 통과했기에 놓쳤습니다. → 스트림 요청은 로깅을 뗀 전용
+클라이언트 + 짧은 타임아웃. **검증은 앱이 실제로 쓰는 클라이언트로.**
+
 ### 6.11 SBS 커버가 하루 대부분 비어 있던 이유
 편성 소스로 쓰던 `bora/today`는 이름대로 **"보이는 라디오" 편성표**라 영상이 있는 방송만
 담겨 있었습니다(어느 날 파워FM은 07-09시·22-23시 두 개뿐). 앱은 그 목록에서 현재 시간대를
@@ -203,6 +244,10 @@ SSE 메타데이터에는 커버가 없어 곡 제목으로 GraphQL을 **검색*
 | KBS `cfpwwwapi.kbs.co.kr` / `gscdn.kbs.co.kr` | **비공식** — 방송사 웹 트래픽에서 확인 | 예고 없이 변경/차단 가능. 서명 URL 만료(~48h) |
 | SBS `apis.sbs.co.kr` (livestream, `onair/channel/S07`, `bora/today`) | **비공식** | 동일. 만료 ~12h |
 | LISTEN.moe (stream, gateway websocket; SSE/GraphQL은 폴백) | 공개 API, 제3자 사용 허용 | 낮음 |
+| sCast.kr `scast.kr:90/ballad.mp3` (발라드 1차) | 국내 개인 서버, 저작권 미확인 | 소멸 가능 → laut.fm 폴백 |
+| laut.fm `stream.laut.fm/kpop-love` (발라드 2차) | GEMA 정산 플랫폼 | 낮음 |
+| Zeno.FM `stream.zeno.fm/hkrivfrongdvv` (2세대 히트) | 개인 운영. 브라우저 UA 401 | 소멸 가능. UA를 Mozilla로 바꾸지 말 것 |
+| Deezer `api.deezer.com/search` (곡 커버) | 공개 API, 키 불필요 | 오탐 방지로 엄격 일치만 채택 |
 | Synology Audio Station Web API | 공식 문서 존재 | 낮음. sid 만료는 자가 복구 |
 
 라디오가 어느 날 멈추면 **방송사 웹 플레이어가 동작하는지 확인하고 네트워크 요청을 다시
