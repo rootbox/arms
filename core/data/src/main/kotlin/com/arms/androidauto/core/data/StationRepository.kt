@@ -16,6 +16,7 @@ data class NowPlayingInfo(
 )
 
 class StationRepository(context: Context) {
+    private val appContext = context.applicationContext
     private val stationDao = AppDatabase.getDatabase(context).stationDao()
     private val radioApiService = NetworkClient.radioApiService
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -73,8 +74,20 @@ class StationRepository(context: Context) {
         return NowPlayingInfo(
             programTitle = metadata.programTitle ?: "정보 없음",
             currentSong = metadata.currentSong ?: "정보 없음",
-            imageUrl = metadata.imageUrl
+            imageUrl = metadata.imageUrl ?: defaultArtworkUri(stationId)
         )
+    }
+
+    // 곡별 커버가 없는 스트리밍 채널(발라드/2세대)은 회색 대신 채널 아트를 보여준다.
+    // 앱에 번들된 리소스라 네트워크 없이 항상 정확하다. 폰(Coil)·차량(서비스 loadArtwork) 모두
+    // android.resource:// URI를 읽을 수 있다.
+    private fun defaultArtworkUri(stationId: String): String? {
+        val res = when (stationId) {
+            "4" -> R.drawable.art_kpop_ballad
+            "5" -> R.drawable.art_kpop_rewind
+            else -> return null
+        }
+        return "android.resource://${appContext.packageName}/$res"
     }
 
     // 다음 실행 시 자동 재개할 수 있도록 마지막으로 재생한 채널을 저장

@@ -91,6 +91,21 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     // LISTEN.moe의 K-POP 24시간 논스톱 스트림. 만료 토큰이 없는 고정 주소.
     private val kpopStreamUrl = "https://listen.moe/kpop/stream"
 
+    // K-POP 발라드 24/7. 1차는 국내 개인 서버(sCast.kr, Shoutcast DNAS 엔드포인트 — Steamcast
+    // 마운트는 ICY 요청에 비표준 상태줄을 돌려주므로 쓰지 않는다), 2차는 laut.fm(GEMA 정산 플랫폼).
+    // 개인 서버는 예고 없이 사라질 수 있어 재생 직전에 살아있는 쪽을 고른다.
+    private val balladStreamUrls = listOf(
+        "https://scast.kr:90/ballad.mp3",
+        "https://stream.laut.fm/kpop-love",
+    )
+    // K-POP 2세대 히트(2000s~2010s). "80/90년대 가요" 전용 공개 스트림은 2026-09 실측에서 없었고,
+    // 이 채널의 실제 편성이 2세대(2009~2017)라 이름을 그에 맞췄다. Zeno.FM은 브라우저 UA를 401로
+    // 막지만 OkHttp/ExoPlayer/libVLC 기본 UA는 통과한다(User-Agent를 Mozilla로 바꾸지 말 것).
+    private val rewindStreamUrls = listOf("https://stream.zeno.fm/hkrivfrongdvv")
+
+    private val balladStationName = "K-POP 발라드 24/7"
+    private val rewindStationName = "K-POP 2세대 히트 24/7"
+
     override fun getStations(): List<StationApiResponse> {
         val kbsStreamUrl = fetchKbsLiveStreamUrl() ?: fallbackStreamUrl
         val sbsStreamUrl = fetchSbsLiveStreamUrl()
@@ -116,7 +131,9 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
                 name = "K-POP 24/7",
                 streamUrl = kpopStreamUrl,
                 type = "STREAMING"
-            )
+            ),
+            StationApiResponse(id = "4", name = balladStationName, streamUrl = balladStreamUrls.first(), type = "STREAMING"),
+            StationApiResponse(id = "5", name = rewindStationName, streamUrl = rewindStreamUrls.first(), type = "STREAMING"),
         )
     }
 
@@ -164,6 +181,8 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
             "1" -> fetchKbsLiveStreamUrl() ?: fallbackStreamUrl
             "2" -> fetchSbsLiveStreamUrl()
             "3" -> kpopStreamUrl
+            "4" -> firstAliveStreamUrl(balladStreamUrls)
+            "5" -> firstAliveStreamUrl(rewindStreamUrls)
             else -> null
         }
     }
@@ -173,8 +192,91 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
             "1" -> kbsMetadata()
             "2" -> sbsMetadata()
             "3" -> kpopMetadata()
+            "4" -> icyStationMetadata("4", balladStationName, balladStreamUrls)
+            "5" -> icyStationMetadata("5", rewindStationName, rewindStreamUrls)
             else -> null
         }
+    }
+
+    // ---- ICY(Shoutcast/Icecast) 스트림 ----
+    // 발라드/2세대 채널은 편성표 API가 없다. 대신 스트림 자체에 실린 ICY 메타데이터("StreamTitle")로
+    // 지금 곡을 읽는다. 세 스트림 모두 icy-metaint(16000~16384)를 주므로, 그만큼의 오디오 바이트 뒤에
+    // 붙는 메타데이터 블록 하나만 읽고 끊는다(호출당 약 16KB).
+
+    private val streamUserAgent = "SimpleRadio (ExoPlayerLib/1.3.1)"
+
+    // 죽은 스트림 감지: 200 + audio/* 인 첫 후보를 쓴다. 전부 죽었으면 1차 URL을 돌려
+    // 플레이어의 오류 경로가 사용자에게 알리게 한다. 후보가 하나면 확인할 것이 없고,
+    // 메타데이터는 8초마다 폴링되므로 선택 결과를 5분간 기억해 매번 두드리지 않는다.
+    private val aliveChoice = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+    private fun firstAliveStreamUrl(candidates: List<String>): String {
+        if (candidates.size == 1) return candidates.first()
+        val key = candidates.first()
+        aliveChoice[key]?.let { (url, at) -> if (System.currentTimeMillis() - at < 5 * 60_000L) return url }
+        val chosen = candidates.firstOrNull { isStreamAlive(it) } ?: candidates.first()
+        aliveChoice[key] = chosen to System.currentTimeMillis()
+        return chosen
+    }
+
+    private fun isStreamAlive(url: String): Boolean = try {
+        val request = Request.Builder().url(url).header("User-Agent", streamUserAgent).build()
+        client.newCall(request).execute().use { r ->
+            r.isSuccessful && (r.header("Content-Type")?.startsWith("audio/") == true)
+        }
+    } catch (e: Exception) { false }
+
+    private fun icyStationMetadata(id: String, name: String, candidates: List<String>): StationApiResponse {
+        val url = firstAliveStreamUrl(candidates)
+        val icy = fetchIcyNowPlaying(url)
+        return StationApiResponse(
+            id = id, name = name, streamUrl = url, type = "STREAMING",
+            programTitle = icy?.streamTitle ?: "실시간 스트리밍 수신 중",
+            currentSong = icy?.stationName ?: name,
+            imageUrl = icy?.streamTitle?.let { fetchStreamTrackArtwork(it) },
+        )
+    }
+
+    private fun fetchIcyNowPlaying(url: String): IcyNowPlaying? = try {
+        val request = Request.Builder().url(url)
+            .header("User-Agent", streamUserAgent)
+            .header("Icy-MetaData", "1")
+            .build()
+        client.newCall(request).execute().use { r ->
+            if (!r.isSuccessful) return null
+            val stationName = cleanIcyName(r.header("icy-name"))
+            val metaint = r.header("icy-metaint")?.trim()?.toIntOrNull()
+                ?: return IcyNowPlaying(stationName, null)
+            val buf = ByteArray(metaint + 1 + 16 * 255)
+            val stream = r.body?.byteStream() ?: return IcyNowPlaying(stationName, null)
+            var read = 0
+            // 메타데이터 블록 길이 바이트까지는 반드시 읽고, 그 뒤는 길이만큼만 더 읽는다.
+            var need = metaint + 1
+            while (read < need) {
+                val n = stream.read(buf, read, buf.size - read)
+                if (n < 0) break
+                read += n
+                if (read >= metaint + 1) need = metaint + 1 + buf[metaint].toInt().and(0xFF) * 16
+            }
+            IcyNowPlaying(stationName, extractIcyStreamTitle(buf.copyOf(read), metaint))
+        }
+    } catch (e: Exception) { null }
+
+    // 곡별 커버: 스트림엔 이미지가 없으므로 Deezer 공개 검색(키 불필요)으로 앨범 커버를 찾는다.
+    // 못 찾으면 null(회색 플레이스홀더). 실패는 조용히 넘긴다.
+    private val artworkCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private fun fetchStreamTrackArtwork(streamTitle: String): String? {
+        artworkCache[streamTitle]?.let { return it.ifEmpty { null } }
+        val found = try {
+            val q = java.net.URLEncoder.encode(cleanTrackQuery(streamTitle), "UTF-8")
+            val request = Request.Builder().url("https://api.deezer.com/search?q=$q&limit=1")
+                .header("User-Agent", streamUserAgent).build()
+            client.newCall(request).execute().use { r ->
+                if (!r.isSuccessful) null
+                else parseDeezerCover(r.body?.string().orEmpty(), streamTitle)
+            }
+        } catch (e: Exception) { null }
+        artworkCache[streamTitle] = found.orEmpty()
+        return found
     }
 
     // 현재 대한민국 시각(KST)을 HHMM 정수로 반환 (예: 14:05 -> 1405)
@@ -456,3 +558,56 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         )
     }
 }
+
+// ICY 메타데이터 결과. stationName은 icy-name 헤더, streamTitle은 "아티스트 - 곡" 형식이 보통.
+internal data class IcyNowPlaying(val stationName: String?, val streamTitle: String?)
+
+// icy-name에는 운영자가 홍보 문구를 붙이곤 한다("Naya Ballad - Soul Kpop # https://sCast.kr").
+internal fun cleanIcyName(raw: String?): String? =
+    raw?.substringBefore('#')?.trim()?.ifBlank { null }
+
+// 응답 본문에서 첫 메타데이터 블록의 StreamTitle을 꺼낸다.
+// 본문 = [오디오 metaint 바이트][길이 1바이트 (x16)][메타데이터 블록 "StreamTitle='...';..."]
+internal fun extractIcyStreamTitle(body: ByteArray, metaint: Int): String? {
+    if (body.size <= metaint) return null
+    val len = body[metaint].toInt().and(0xFF) * 16
+    if (len == 0) return null
+    val end = minOf(body.size, metaint + 1 + len)
+    val block = String(body, metaint + 1, end - (metaint + 1), Charsets.UTF_8)
+    return Regex("StreamTitle='([^']*)'").find(block)?.groupValues?.get(1)?.trim()?.ifBlank { null }
+}
+
+// "임재현 - Heaven (2023)" → "임재현 Heaven" 처럼 검색에 방해되는 괄호/연도/구분자를 뗀다.
+internal fun cleanTrackQuery(streamTitle: String): String =
+    streamTitle.replace(Regex("\\([^)]*\\)|\\[[^]]*]"), " ")
+        .replace(" - ", " ").replace(Regex("\\s+"), " ").trim()
+
+// 비교용 정규화: 소문자, 괄호 내용 제거, 영숫자·한글만 남김. "K. will" == "K.Will", "Heaven (2023)" == "Heaven".
+internal fun normalizeForMatch(s: String): String =
+    s.lowercase().replace(Regex("\\([^)]*\\)|\\[[^]]*]"), "").replace(Regex("[^0-9a-z가-힣]"), "")
+
+// Deezer 검색은 엉뚱한 곡을 1순위로 주기도 한다("임재현 Heaven" → 다른 가수의 "Your presence is heaven").
+// 틀린 커버는 회색보다 나쁘므로 제목이 정규화 후 같고 아티스트가 서로를 포함할 때만 채택한다.
+internal fun deezerMatches(streamTitle: String, deezerArtist: String, deezerTitle: String): Boolean {
+    val parts = streamTitle.split(" - ", limit = 2)
+    if (parts.size != 2) return false
+    val (artist, title) = parts.map { normalizeForMatch(it) }
+    val dArtist = normalizeForMatch(deezerArtist)
+    val dTitle = normalizeForMatch(deezerTitle)
+    if (title.isEmpty() || artist.isEmpty() || dTitle != title) return false
+    return dArtist.contains(artist) || artist.contains(dArtist)
+}
+
+// Deezer /search 응답에서 첫 곡이 요청 곡과 같을 때만 앨범 커버(큰 사이즈)를 돌려준다.
+internal fun parseDeezerCover(body: String, streamTitle: String): String? = try {
+    val data = JSONObject(body).optJSONArray("data") ?: return null
+    if (data.length() == 0) null
+    else {
+        val first = data.getJSONObject(0)
+        val artist = first.optJSONObject("artist")?.optString("name").orEmpty()
+        if (!deezerMatches(streamTitle, artist, first.optString("title"))) null
+        else first.optJSONObject("album")?.let { a ->
+            a.optString("cover_xl").ifBlank { null } ?: a.optString("cover_big").ifBlank { null }
+        }
+    }
+} catch (e: Exception) { null }

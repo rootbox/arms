@@ -35,8 +35,15 @@ class AppState(private val scope: CoroutineScope) {
         Triple("1", "KBS Cool FM (89.1 MHz)", "실시간 라디오 방송"),
         Triple("2", "SBS 파워FM (107.7 MHz)", "실시간 라디오 방송"),
         Triple("3", "K-POP 24/7", "24/7 온라인 스트리밍"),
+        Triple("4", "K-POP 발라드 24/7", "24/7 온라인 스트리밍"),
+        Triple("5", "K-POP 2세대 히트 24/7", "24/7 온라인 스트리밍"),
     )
     fun stationList() = stations
+
+    // 곡별 커버가 없는 스트리밍 채널은 번들 채널 아트로(회색 대신).
+    private fun defaultArt(id: String): String? = when (id) {
+        "4" -> "res:/art_kpop_ballad.png"; "5" -> "res:/art_kpop_rewind.png"; else -> null
+    }
 
     init {
         player.onIsPlayingChanged = { isPlaying = it }
@@ -56,7 +63,7 @@ class AppState(private val scope: CoroutineScope) {
             val url = withContext(Dispatchers.IO) { radioApi.getPlaybackUrl(id) } ?: meta?.streamUrl
             if (url.isNullOrBlank()) { statusMessage = "스트림 주소를 받지 못했습니다"; return@launch }
             withContext(Dispatchers.IO) { player.play(url) }
-            meta?.let { nowSubtitle = it.programTitle ?: st.third; nowCover = it.imageUrl }
+            meta?.let { nowSubtitle = it.programTitle ?: st.third; nowCover = it.imageUrl ?: defaultArt(id) }
         }
     }
 

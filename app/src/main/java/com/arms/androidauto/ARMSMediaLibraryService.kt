@@ -1141,7 +1141,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
     // 커버 URL을 내려받아 다른 프로세스가 읽을 수 있는 content:// URI로 만든다. 실패하면 null.
     private suspend fun loadArtwork(url: String, stationId: String): android.net.Uri? {
-        val bytes = withContext(Dispatchers.IO) { fetchArtworkBytes(url) } ?: return null
+        val bytes = withContext(Dispatchers.IO) {
+            // 번들된 채널 아트(android.resource://)는 네트워크가 아니라 리소스에서 읽는다.
+            if (url.startsWith("android.resource://")) {
+                runCatching { contentResolver.openInputStream(android.net.Uri.parse(url))?.use { it.readBytes() } }.getOrNull()
+            } else fetchArtworkBytes(url)
+        } ?: return null
         return createArtworkContentUri(bytes, stationId)
     }
 
