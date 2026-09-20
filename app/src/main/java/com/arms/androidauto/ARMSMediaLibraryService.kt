@@ -98,6 +98,26 @@ internal object AudioFocusResumePolicy {
         }
 }
 
+// 블루투스 모드(Android Auto 없이 폰이 재생을 시작해 차량 스피커로 내보내는 경우) 정책.
+// 이 서비스의 정지/재개 로직은 원래 "플레이어는 차량(Android Auto) 전용"을 전제로 짜였다.
+// 폰 화면의 재생도 이 세션을 타게 되면서, 차량이 시작한 재생과 폰이 시작한 재생을 구분해야
+// 폰 재생이 Android Auto 연결 상태에 휘둘리지 않는다. 규칙을 한 곳에 모아 단위 테스트한다.
+internal object BluetoothModePolicy {
+    // Android Auto가 끊겼을 때 정지·큐 폐기는 차량이 시작한 재생에만 적용한다. 폰이 시작한
+    // 재생(블루투스/폰 스피커)은 차량 링크와 무관하다.
+    fun shouldStopOnCarDisconnect(initiatedByCar: Boolean): Boolean = initiatedByCar
+
+    // 포커스 상실 후 자동 재개를 "차가 없으면 포기"하는 규칙도 차량 시작 재생에만. 폰이 시작한
+    // 재생은 내비 음성안내 뒤에 되살아나야 한다(그게 블루투스 모드의 핵심 기대 동작).
+    fun shouldSkipFocusResume(initiatedByCar: Boolean, carDefinitelyDisconnected: Boolean): Boolean =
+        initiatedByCar && carDefinitelyDisconnected
+
+    // 출력 경로 소실(블루투스 끊김·이어폰 분리): 라디오는 실시간이라 의미 있는 일시정지 지점이
+    // 없으므로 완전히 멈추고 큐를 비운다(다음 연결에서 onPlaybackResumption이 새 URL로 재개).
+    // NAS 음악은 ExoPlayer의 기본 일시정지로 두어 위치를 유지한다.
+    fun shouldStopOnBecomingNoisy(isNasContent: Boolean): Boolean = !isNasContent
+}
+
 @OptIn(UnstableApi::class)
 class ARMSMediaLibraryService : MediaLibraryService() {
 
@@ -195,6 +215,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     private fun isCarDefinitelyDisconnected(): Boolean =
         carConnectionType == CarConnection.CONNECTION_TYPE_NOT_CONNECTED
 
+    // 현재 큐를 차량 컨트롤러(Android Auto)가 시작했는지. 폰 화면이 시작했으면 false.
+    // 차량 연결 해제 시 정지/큐 폐기와 포커스 재개 포기는 이 값이 true일 때만 적용한다.
+    private var playbackInitiatedByCar = false
+
     override fun onCreate() {
         super.onCreate()
 
@@ -204,6 +228,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // (다른 음악 앱이 먼저 재생돼 포커스를 요청해야 그제서야 이 앱 소리도 들리던 문제).
         // 오디오 포커스를 명시적으로 요청하도록 설정해 재생 시작과 동시에 경로가 열리게 한다.
         player = ExoPlayer.Builder(this).build().apply {
+            // 블루투스가 끊기거나 이어폰이 빠지면(ACTION_AUDIO_BECOMING_NOISY) 폰 스피커로
+            // 계속 흘러나오지 않도록 멈춘다. 라디오는 아래 onPlayWhenReadyChanged에서 완전 정지.
+            setHandleAudioBecomingNoisy(true)
             setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -264,6 +291,11 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // (SUPPRESSED_TOO_LONG)에는 재개하지 않고 멈춘 채로 남는다 - 음성인식이 끝나도
             // 라디오가 다시 시작되지 않던 원인. 이 경우 포커스가 풀리는 것을 지켜보다 되살린다.
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY) {
+                    val isNas = MediaIdScheme.isNas(player.currentMediaItem?.mediaId)
+                    if (BluetoothModePolicy.shouldStopOnBecomingNoisy(isNas)) stopPlaybackAndClearBuffer()
+                    return
+                }
                 if (playWhenReady) {
                     // 스스로 재개했든 아래 재시도로 살아났든, 대기 상태를 푼다.
                     pausedByAudioFocusLoss = false
@@ -426,10 +458,14 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 val connected = type != CarConnection.CONNECTION_TYPE_NOT_CONNECTED
                 if (wasConnected && !connected) {
                     // 차에서 내렸다. 예약된 정지가 있으면 기다리지 말고 즉시 정리한다.
+                    // (폰이 시작한 재생은 차량 링크와 무관하므로 건드리지 않는다)
                     carDisconnectStopJob?.cancel()
-                    stopPlaybackAndClearBuffer()
+                    if (BluetoothModePolicy.shouldStopOnCarDisconnect(playbackInitiatedByCar)) {
+                        stopPlaybackAndClearBuffer()
+                    }
                 } else if (!wasConnected && connected) {
-                    discardStaleQueueIfIdle()
+                    // 폰이 방금 일시정지해 둔 큐는 "낡은 큐"가 아니다. 지난 주행의 차량 큐만 폐기.
+                    if (playbackInitiatedByCar) discardStaleQueueIfIdle()
                 }
             }
             connection.type.observeForever(observer)
@@ -454,8 +490,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 if (!pausedByAudioFocusLoss) return@launch
                 if (player.playWhenReady) return@launch // ExoPlayer가 스스로 재개함
                 if (player.currentMediaItem == null) return@launch // 재생할 것이 없음
-                // 차가 없는 것이 확인되면 되살릴 이유가 없다 (폰 스피커로 갑자기 켜지면 안 된다).
-                if (isCarDefinitelyDisconnected()) return@launch
+                // 차량이 시작한 재생인데 차가 없는 것이 확인되면 되살릴 이유가 없다
+                // (폰 스피커로 갑자기 켜지면 안 된다). 폰이 시작한 재생은 되살린다.
+                if (BluetoothModePolicy.shouldSkipFocusResume(playbackInitiatedByCar, isCarDefinitelyDisconnected())) return@launch
                 // 통화 중이거나 다른 앱이 소리를 내는 중이면 시도 자체를 하지 않는다.
                 // 이건 거부가 아니라 "지금은 때가 아님"이므로 실패로 세지 않는다.
                 if (isAudioBusy()) continue
@@ -851,6 +888,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = asyncResult {
+            // 시동 시 Android Auto가 부르면 차량 재생, 블루투스 헤드유닛의 PLAY나 알림이 부르면 폰 재생.
+            playbackInitiatedByCar = isCarController(controller)
             // 마지막에 듣던 것이 NAS 앨범이면 그걸 복원한다. NAS는 로그인이 필요해 라디오보다
             // 느릴 수 있으므로, 제한 시간 안에 못 끝내면 라디오로 폴백한다.
             // (여기서 아무 것도 못 돌려주면 "시동을 걸었는데 아무 소리도 안 나는" 상태가 된다)
@@ -891,7 +930,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             if (!isCarController(controller)) return
             carDisconnectStopJob?.cancel()
             // CarConnection 상태를 못 받는 기기에서도 낡은 큐가 되살아나지 않도록 여기서도 확인한다.
-            discardStaleQueueIfIdle()
+            if (playbackInitiatedByCar) discardStaleQueueIfIdle()
         }
 
         // 차량 연결이 끊기면(시동 OFF, USB/블루투스 분리, Android Auto 종료) 재생을 즉시 멈추고
@@ -906,6 +945,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
             super.onDisconnected(session, controller)
             if (!isCarController(controller)) return
+            if (!BluetoothModePolicy.shouldStopOnCarDisconnect(playbackInitiatedByCar)) return
             // 끊긴 본인이 목록에서 아직 안 빠졌을 수 있으므로 명시적으로 제외하고 센다.
             if (hasCarControllerConnected(excluding = controller)) return
 
@@ -925,9 +965,36 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> = asyncResult {
-            // 앨범 하나를 누르면 그 앨범 전체가 큐가 되어야 하므로, 요청 1건이 여러 개의
-            // 아이템으로 늘어날 수 있다 (flatMap).
+            resolveMediaItems(controller, mediaItems).toMutableList()
+        }
+
+        // 폰 화면이 "앨범의 n번째 곡부터 / 이어듣기 위치"로 재생을 요청할 때. 기본 구현도
+        // onAddMediaItems로 위임하지만, 요청 1건이 여러 아이템으로 늘어나는 이 앱에서
+        // 시작 인덱스/위치가 확실히 보존되도록 명시적으로 처리한다.
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = asyncResult {
+            val resolved = resolveMediaItems(controller, mediaItems)
+            val index = if (startIndex == C.INDEX_UNSET) 0 else startIndex.coerceIn(0, resolved.lastIndex)
+            val position = if (startPositionMs == C.TIME_UNSET) C.TIME_UNSET else startPositionMs
+            MediaSession.MediaItemsWithStartPosition(ImmutableList.copyOf(resolved), index, position)
+        }
+
+        // 컨트롤러(차량 또는 폰 화면)가 넘긴 항목을 실제 재생 항목으로. 앨범 하나를 누르면
+        // 그 앨범 전체가 큐가 되어야 하므로, 요청 1건이 여러 개의 아이템으로 늘어날 수 있다.
+        // 차량이 시작했는지 여부를 여기서 기록해, 이후 정지/재개 판단(BluetoothModePolicy)에 쓴다.
+        private suspend fun resolveMediaItems(
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>
+        ): List<MediaItem> {
+            playbackInitiatedByCar = isCarController(controller)
             val resolved = mediaItems.flatMap { item ->
+                // 이미 스트림 URI를 갖고 온 항목은 그대로 쓴다(폰 화면의 AudioPlayer 계약 호환용).
+                if (item.localConfiguration != null) return@flatMap listOf(item)
                 when (val ref = MediaIdScheme.decode(item.mediaId)) {
                     is MediaIdScheme.MediaRef.Radio -> buildRadioItem(ref.stationId, controller.packageName)
                     is MediaIdScheme.MediaRef.Album -> buildNasAlbumQueue(ref.albumArtist, ref.name)
@@ -936,9 +1003,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 }
             }
             // 하나도 못 만들면 media3가 빈 큐로 예외를 던지거나 조용히 아무 일도 안 한다.
-            // 차량에 오류가 드러나도록 명시적으로 실패시킨다.
+            // 호출한 쪽에 오류가 드러나도록 명시적으로 실패시킨다.
             if (resolved.isEmpty()) throw IllegalStateException("재생 가능한 항목을 찾지 못했습니다")
-            resolved.toMutableList()
+            return resolved
         }
     }
 
