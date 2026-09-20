@@ -756,7 +756,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                     ?: nextStation.frequencyOrUrl
                 applyLoudnessCompensation(nextStation.id)
                 val quickItem = createPlayableItem(nextStation).buildUpon()
-                    .setUri(android.net.Uri.parse(freshUrl)).build()
+                    .setUri(android.net.Uri.parse(freshUrl))
+                    // 브라우징용 부제("일반 주파수")가 잠깐 노출되지 않도록 비워 둔다. 갱신 루프가 곧 채운다.
+                    .setMediaMetadata(createPlayableItem(nextStation).mediaMetadata.buildUpon().setSubtitle(null).build())
+                    .build()
                 player.setMediaItem(quickItem)
                 player.prepare()
                 player.play()

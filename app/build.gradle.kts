@@ -28,7 +28,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 20
-        versionName = "0.7.0-rc7"
+        versionName = "0.7.0-rc8"
     }
 
     signingConfigs {
@@ -94,6 +94,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
     implementation("com.google.android.material:material:1.14.0")
     implementation("androidx.media3:media3-exoplayer:1.3.1")
+    // KBS/SBS는 HLS 스트림. 예전엔 core/media를 통해 런타임에 전이됐는데 그 모듈을 지우면서
+    // 빠져 라디오 재생이 "No suitable media source factory"로 깨졌다(rc4~rc7). 직접 의존한다.
+    implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
     implementation("androidx.media3:media3-session:1.3.1")
     implementation("androidx.car.app:app:1.7.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
