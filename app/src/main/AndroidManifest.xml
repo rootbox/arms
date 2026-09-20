@@ -60,6 +60,16 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- 앱 프로세스가 죽어 있을 때(시동을 껐다 켠 뒤 등) 블루투스 헤드유닛의 PLAY 같은 미디어
+             버튼을 받아 서비스를 깨우기 위해 필요하다. Media3가 이 리시버로 세션을 되살리고
+             onPlaybackResumption()을 호출해 마지막에 듣던 것을 재개한다. -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

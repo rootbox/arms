@@ -585,6 +585,30 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         player.onIsPlayingChanged = { playing ->
             if (nasPlaybackSource != null) isNasPaused = !playing
         }
+        // 차량/블루투스의 이전·다음 버튼으로 서비스가 채널을 바꾸거나, 블루투스 끊김으로 큐가
+        // 비면 폰 화면도 따라간다. (rc1 검증에서 서비스는 SBS로 넘어갔는데 화면은 KBS로 남았다)
+        player.onMediaIdChanged = { mediaId ->
+            when {
+                mediaId == null -> { playingStationId = null; nasPlaybackSource = null }
+                MediaIdScheme.isNas(mediaId) -> if (nasPlaybackSource == null) {
+                    playingStationId = null
+                    selectedStationId = null
+                    coroutineScope.launch {
+                        nasPlaybackSource = when (val last = playbackStateStore.getLastPlayed()) {
+                            is LastPlayed.Nas -> NasPlaybackSource.Album(last.album)
+                            is LastPlayed.NasPlaylist ->
+                                nasPlaylistRepository.getPlaylist(last.playlistId)?.let { NasPlaybackSource.Playlist(it.id, it.name) }
+                            else -> null
+                        }
+                    }
+                }
+                else -> {
+                    nasPlaybackSource = null
+                    playingStationId = mediaId
+                    selectedStationId = mediaId
+                }
+            }
+        }
     }
 
     // 앱 시작 시 채널 목록 새로고침

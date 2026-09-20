@@ -33,6 +33,11 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     override var onTrackChanged: ((title: String?, artworkUri: String?) -> Unit)? = null
     override var onIsPlayingChanged: ((Boolean) -> Unit)? = null
 
+    // 서비스 쪽에서 재생 항목이 바뀌었을 때(차량/블루투스의 이전·다음 버튼, 알림, 정지로 큐가
+    // 비는 경우) 폰 화면이 따라가도록 알린다. 플레이어가 하나가 되면서 "폰이 시작하지 않은
+    // 변경"이 생겼기 때문에, 폰 화면은 자기 상태를 스스로 정하지 말고 세션을 따라야 한다.
+    var onMediaIdChanged: ((mediaId: String?) -> Unit)? = null
+
     private var controller: MediaController? = null
     private val pending = ArrayDeque<(MediaController) -> Unit>()
     private var released = false
@@ -41,6 +46,7 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) { onIsPlayingChanged?.invoke(isPlaying) }
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            onMediaIdChanged?.invoke(mediaItem?.mediaId)
             onTrackChanged?.invoke(
                 mediaItem?.mediaMetadata?.title?.toString(),
                 mediaItem?.mediaMetadata?.artworkUri?.toString()
