@@ -766,6 +766,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 stationRepository.saveLastPlayedStationId(nextStation.id)
                 playbackStateStore.saveLastPlayed(LastPlayed.Radio(nextStation.id))
                 android.util.Log.i("ARMS", "채널 전환 완료 → ${nextStation.id}")
+                // 다음 주기(최대 8초)를 기다리지 않고 편성/곡/커버를 바로 채운다.
+                // (재생이 시작돼야 갱신 루프의 isPlaying 가드를 통과하므로 잠깐 뒤에)
+                serviceScope.launch { delay(1_500L); refreshCurrentNowPlaying() }
             } catch (e: Exception) {
                 android.util.Log.w("ARMS", "채널 전환 실패 (direction=$direction)", e)
             }
