@@ -2,6 +2,7 @@ package com.arms.androidauto
 
 import android.content.ComponentName
 import android.content.Context
+import android.os.Bundle
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -76,9 +77,27 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     }
 
     // 컨트롤러가 아직 연결 중이면 요청을 보관했다가 연결되는 즉시 실행한다.
+    // 컨트롤러는 인자를 자기 기준으로 검증해 예외를 던질 수 있다(예: IllegalSeekPositionException).
+    // 재생 요청 하나가 앱 전체를 죽이면 안 되므로 여기서 잡아 재생 오류로 알린다.
     private fun withController(action: (MediaController) -> Unit) {
-        controller?.let(action) ?: pending.addLast(action)
+        val safe: (MediaController) -> Unit = { c ->
+            try { action(c) } catch (e: Exception) {
+                onPlaybackError?.invoke(e.message ?: e.javaClass.simpleName)
+            }
+        }
+        controller?.let(safe) ?: pending.addLast(safe)
     }
+
+    // "앨범의 n번째 곡부터 / 이어듣기 위치"는 setMediaItems(startIndex)로 보낼 수 없다.
+    // 컨트롤러가 서비스로 보내기 전에 자기가 받은 목록(앨범 항목 1개) 기준으로 인덱스를 검증해
+    // IllegalSeekPositionException을 던지기 때문이다(rc1 크래시). 대신 요청 메타데이터에 실어 보내고,
+    // 서비스가 큐를 실제 곡들로 확장한 뒤 시작 위치를 정한다.
+    private fun requestItem(mediaId: String, startIndex: Int, startPositionMs: Long): MediaItem =
+        MediaItem.Builder().setMediaId(mediaId).setRequestMetadata(
+            MediaItem.RequestMetadata.Builder().setExtras(Bundle().apply {
+                putInt(EXTRA_START_INDEX, startIndex); putLong(EXTRA_START_POSITION_MS, startPositionMs)
+            }).build()
+        ).build()
 
     // ---- 이 앱 전용 재생 시작 (mediaId 기반) ----
 
@@ -88,12 +107,12 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     }
 
     fun playNasAlbum(album: NasAlbum, startIndex: Int = 0, startPositionMs: Long = 0L) = withController { c ->
-        c.setMediaItems(listOf(MediaItem.Builder().setMediaId(MediaIdScheme.encodeAlbum(album)).build()), startIndex, startPositionMs)
+        c.setMediaItem(requestItem(MediaIdScheme.encodeAlbum(album), startIndex, startPositionMs))
         c.prepare(); c.play()
     }
 
     fun playNasPlaylist(playlistId: Long, startIndex: Int = 0, startPositionMs: Long = 0L) = withController { c ->
-        c.setMediaItems(listOf(MediaItem.Builder().setMediaId(MediaIdScheme.encodePlaylist(playlistId)).build()), startIndex, startPositionMs)
+        c.setMediaItem(requestItem(MediaIdScheme.encodePlaylist(playlistId), startIndex, startPositionMs))
         c.prepare(); c.play()
     }
 
@@ -146,6 +165,11 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
         set(value) { controller?.repeatMode = value }
 
     override fun stop() { controller?.stop() }
+
+    companion object {
+        const val EXTRA_START_INDEX = "com.arms.androidauto.START_INDEX"
+        const val EXTRA_START_POSITION_MS = "com.arms.androidauto.START_POSITION_MS"
+    }
 
     // 액티비티 종료 시 컨트롤러만 놓는다. 재생은 서비스가 계속 이어간다(알림에서 제어).
     override fun release() {

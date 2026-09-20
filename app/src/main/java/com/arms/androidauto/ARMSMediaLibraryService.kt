@@ -118,6 +118,20 @@ internal object BluetoothModePolicy {
     fun shouldStopOnBecomingNoisy(isNasContent: Boolean): Boolean = !isNasContent
 }
 
+// 재생 요청의 시작 위치 결정. 컨트롤러가 준 startIndex(요청 목록 기준)보다 요청 메타데이터에
+// 실린 값(확장된 큐 기준)을 우선하고, 확장된 큐 크기로 안전하게 자른다.
+internal object StartPositionPolicy {
+    fun resolve(
+        requestedIndex: Int, requestedPositionMs: Long,
+        extraIndex: Int?, extraPositionMs: Long?, queueSize: Int
+    ): Pair<Int, Long> {
+        val index = (extraIndex ?: requestedIndex.takeIf { it != C.INDEX_UNSET } ?: 0)
+            .coerceIn(0, (queueSize - 1).coerceAtLeast(0))
+        val position = extraPositionMs ?: requestedPositionMs
+        return index to position
+    }
+}
+
 @OptIn(UnstableApi::class)
 class ARMSMediaLibraryService : MediaLibraryService() {
 
@@ -979,8 +993,14 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             startPositionMs: Long
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = asyncResult {
             val resolved = resolveMediaItems(controller, mediaItems)
-            val index = if (startIndex == C.INDEX_UNSET) 0 else startIndex.coerceIn(0, resolved.lastIndex)
-            val position = if (startPositionMs == C.TIME_UNSET) C.TIME_UNSET else startPositionMs
+            // 폰 화면은 "n번째 곡부터/이어듣기 위치"를 요청 메타데이터로 보낸다(SessionAudioPlayer 참고).
+            val extras = mediaItems.firstOrNull()?.requestMetadata?.extras
+            val (index, position) = StartPositionPolicy.resolve(
+                requestedIndex = startIndex, requestedPositionMs = startPositionMs,
+                extraIndex = extras?.takeIf { it.containsKey(SessionAudioPlayer.EXTRA_START_INDEX) }?.getInt(SessionAudioPlayer.EXTRA_START_INDEX),
+                extraPositionMs = extras?.takeIf { it.containsKey(SessionAudioPlayer.EXTRA_START_POSITION_MS) }?.getLong(SessionAudioPlayer.EXTRA_START_POSITION_MS),
+                queueSize = resolved.size
+            )
             MediaSession.MediaItemsWithStartPosition(ImmutableList.copyOf(resolved), index, position)
         }
 
