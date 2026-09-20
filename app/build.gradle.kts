@@ -78,7 +78,6 @@ kotlin {
 
 dependencies {
     implementation(project(":core:model"))
-    implementation(project(":core:media"))
     implementation(project(":core:data"))
 
     implementation(platform("androidx.compose:compose-bom:2024.09.03"))

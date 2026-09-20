@@ -110,10 +110,17 @@ OS 표준 신호를 받아 처리한다. 이어폰 뽑힘에도 같은 동작이
 - 포그라운드 진입 시 재확인(1h 스로틀), 실패 사유 표시, 403(한도) 구분.
 - 작고 독립적이라 Phase 1 개발과 **병행**하고, 먼저 릴리즈해 배너 자체를 실검증.
 
-### Phase 1 — 세션 통합 ✅ 구현 완료 (0.7.0-rc1, 기기·실차 검증 대기)
+### Phase 1 — 세션 통합 ✅ 기기 검증 완료 (0.7.0-rc3 / S25) — 실차 검증 대기
+> rc3 실기기 결과: 세션 `active=true · PLAYING · "SBS 파워FM, 웬디의 영스트리트"`(②), 미디어 버튼
+> NEXT로 채널 전환 + 폰 화면 동기화(③), NAS 3번째 곡부터 재생·NEXT·PAUSE/PLAY 위치 유지, 미디어
+> 알림(잠금화면 컨트롤) 생성, **프로세스가 죽은 뒤 PLAY 버튼으로 서비스 재시작+재개**(⑤ 경로,
+> MediaButtonReceiver), 크래시 0. rc1→rc3에서 잡은 것: 서비스 채널 전환의 UI 미동기화,
+> MediaButtonReceiver 미선언, NAS n번째 곡 IllegalSeekPositionException 크래시(컨트롤러가 요청 목록
+> 기준으로 인덱스를 검증 → 시작 위치를 요청 메타데이터로 보내 서비스가 결정).
+> 남은 검증(사용자): MINI 블루투스 실차(④ 끊김 정지는 adb로 시뮬레이션 불가), Android Auto 회귀.
 - `SessionAudioPlayer : AudioPlayer`(MediaController 래퍼) 구현, MainActivity 재생 경로 교체.
 - 서비스의 차량 전용 가정 일반화(§3). 재생 경로 개념 도입.
-- `core/media MediaPlayer`는 통합 후 삭제 후보(데스크톱은 자체 구현이라 무관).
+- `core/media MediaPlayer`는 통합 후 삭제 완료(데스크톱은 자체 구현이라 무관).
 - **효과**: 증상 ②③ 해결 + 잠금화면 컨트롤 + 배경 재생 안정화.
 - 게이트: 단위 테스트 전수 / 폰 회귀(라디오·NAS·즐겨찾기·이어듣기) / **실차 Android Auto 회귀**
   (연결 해제 정지, 시동 자동 재개, 셔플·반복, NAS) / **MINI 블루투스**(정보 노출, 이전/다음).
