@@ -42,8 +42,12 @@ jobs:
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk simple-radio-${{ github.ref_name }}.apk
 
+      # "-rc" 태그(예: v20-rc1)는 prerelease로 발행한다. 앱의 UpdateChecker는 /releases/latest를
+      # 보는데 GitHub는 prerelease를 latest에서 제외하므로, 사용자 폰에 배너가 뜨지 않는
+      # 안전한 테스트 빌드 채널이 된다(adb로 직접 설치해 검증한 뒤 정식 태그를 민다).
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: simple-radio-${{ github.ref_name }}.apk
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
