@@ -97,7 +97,11 @@ OS 표준 신호를 받아 처리한다. 이어폰 뽑힘에도 같은 동작이
 
 ## 4. 단계
 
-### Phase 0 — 진단 확정 (반나절)
+### Phase 0 — 진단 확정 ✅ 실기기 확인 (2026-09-20, S25 / v0.6.11)
+> `dumpsys media_session` 결과: 폰에서 KBS 재생 중 세션 스택의 유일한 세션은
+> `com.google.android.youtube (active=false)`, 우리 패키지는 "Audio playback" 목록(원시 오디오)에만
+> 등장. `dumpsys audio`에는 `androidx.media3.exoplayer.AudioFocusManager`(자체 ExoPlayer)가 포커스를
+> 잡은 기록. → **폰 재생에 MediaSession이 없다**는 진단이 코드·기기 양쪽에서 확정.
 - 폰(S25/S22)에서 라디오 재생 중 `adb shell dumpsys media_session` → 우리 패키지의 세션이
   없음을 확인(진단 고정). 재생 중 BT 끊기 로그로 becomingNoisy 미처리 확인.
 - 업데이트 배너: 미노출 폰의 footer "마지막 확인" 시각 확인(사용자). 비어 있으면 후보 1·2.
