@@ -607,7 +607,7 @@ internal fun deezerMatches(streamTitle: String, deezerArtist: String, deezerTitl
     val (artist, title) = parts.map { normalizeForMatch(it) }
     val dArtist = normalizeForMatch(deezerArtist)
     val dTitle = normalizeForMatch(deezerTitle)
-    if (title.isEmpty() || artist.isEmpty() || dTitle != title) return false
+    if (title.isEmpty() || artist.isEmpty() || dArtist.isEmpty() || dTitle != title) return false
     return dArtist.contains(artist) || artist.contains(dArtist)
 }
 

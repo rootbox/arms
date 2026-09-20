@@ -36,5 +36,8 @@ class IcyStreamParserTest {
         assertNull(parseDeezerCover(wrong, "임재현 - Heaven (2023)"))
         assertEquals(false, deezerMatches("임재현 - Heaven", "Seulki Hong", "Your presence is heaven"))
         assertEquals(true, deezerMatches("Ailee - 첫눈처럼 너에게 가겠다", "Ailee (에일리)", "첫눈처럼 너에게 가겠다 (Live)"))
+        // 아티스트가 비어 있으면 "포함" 검사가 항상 참이 되어 오탐이 통과하므로 거부해야 한다
+        assertEquals(false, deezerMatches("UNI.T - 난말야", "", "난 말야"))
+        assertEquals(false, deezerMatches("UNI.T - 난말야", "As One", "난 말야"))
     }
 }
