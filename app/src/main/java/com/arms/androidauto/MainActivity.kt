@@ -103,6 +103,7 @@ class MainActivity : ComponentActivity() {
         // ARMSMediaLibraryService의 세션으로 보낸다(블루투스/알림/차량이 같은 재생을 본다).
         stationRepository = StationRepository(this)
         mediaPlayer = SessionAudioPlayer(this)
+        requestNotificationPermissionIfNeeded()
 
         setContent {
             ARMSAndroidAutoTheme {
@@ -119,6 +120,19 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         mediaPlayer.release()
         super.onDestroy()
+    }
+
+    // Android 13+는 알림 권한을 앱이 요청해야 한다. 미디어 세션 알림은 권한 없이도 표시되지만,
+    // 신규 설치 폰의 앱 정보에 "알림 차단됨"으로 남아 잠금화면/알림 컨트롤 신뢰성을 해칠 수 있어
+    // 첫 실행에 한 번 묻는다(거부해도 재생에는 영향 없음).
+    private val notificationPermissionLauncher =
+        registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
 }
 
