@@ -15,6 +15,11 @@ class IcyStreamParserTest {
         val b = body(16, "StreamTitle='임재현 - Heaven (2023)';StreamUrl='';")
         assertEquals("임재현 - Heaven (2023)", extractIcyStreamTitle(b, 16))
     }
+    @Test fun `자리표시자 제목("-")은 곡 정보로 보지 않는다`() {
+        assertNull(normalizeIcyTitle("-")); assertNull(normalizeIcyTitle(" - ")); assertNull(normalizeIcyTitle(""))
+        assertEquals("IU - 새 신발", normalizeIcyTitle(" IU - 새 신발 "))
+        assertNull(extractIcyStreamTitle(body(16, "StreamTitle='-';"), 16))
+    }
     @Test fun `길이 0 블록(곡 정보 없음)은 null`() { assertNull(extractIcyStreamTitle(ByteArray(16) + byteArrayOf(0), 16)) }
     @Test fun `본문이 metaint보다 짧으면 null`() { assertNull(extractIcyStreamTitle(ByteArray(5), 16)) }
     @Test fun `icy-name의 홍보 문구를 뗀다`() {

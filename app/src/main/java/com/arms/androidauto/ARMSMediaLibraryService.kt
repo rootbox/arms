@@ -282,9 +282,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 for (i in 0 until metadata.length()) {
                     val entry = metadata.get(i)
                     if (entry is IcyInfo) {
+                        // "-" 같은 자리표시자(곡 사이)는 무시하고 이전 곡 정보를 유지한다.
                         val title = entry.title?.trim().orEmpty()
                         val stationId = player.currentMediaItem?.mediaId ?: return
-                        if (title.isNotEmpty() && stationRepository.isInbandMetadataStation(stationId)) {
+                        if (title.any { it.isLetterOrDigit() } && stationRepository.isInbandMetadataStation(stationId)) {
                             applyInbandTitle(stationId, title)
                         }
                     }

@@ -559,9 +559,13 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
             return null
         }
         try {
-            latch.await(10, TimeUnit.SECONDS)
+            latch.await(6, TimeUnit.SECONDS)
         } finally {
-            socket.close(1000, null)
+            // close()는 종료 핸드셰이크를 "요청"할 뿐이라 서버가 응답하지 않거나 업그레이드 중이면
+            // 소켓이 그대로 남는다(S22에서 Cloudflare ESTAB 소켓 19개 누수 → 이후 ws/GraphQL이
+            // 10초 타임아웃). cancel()로 자원을 즉시 놓는다.
+            runCatching { socket.close(1000, null) }
+            runCatching { socket.cancel() }
         }
         return result
     }
@@ -614,7 +618,13 @@ internal fun extractIcyStreamTitle(body: ByteArray, metaint: Int): String? {
     if (len == 0) return null
     val end = minOf(body.size, metaint + 1 + len)
     val block = String(body, metaint + 1, end - (metaint + 1), Charsets.UTF_8)
-    return Regex("StreamTitle='([^']*)'").find(block)?.groupValues?.get(1)?.trim()?.ifBlank { null }
+    return Regex("StreamTitle='([^']*)'").find(block)?.groupValues?.get(1)?.let { normalizeIcyTitle(it) }
+}
+
+// "-", "", " - " 처럼 곡 정보가 없을 때 서버가 보내는 자리표시자는 제목이 아니다(Zeno가 곡 사이에 보냄).
+internal fun normalizeIcyTitle(raw: String?): String? {
+    val t = raw?.trim() ?: return null
+    return if (t.any { it.isLetterOrDigit() }) t else null
 }
 
 // "임재현 - Heaven (2023)" → "임재현 Heaven" 처럼 검색에 방해되는 괄호/연도/구분자를 뗀다.
