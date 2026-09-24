@@ -585,6 +585,10 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         player.onIsPlayingChanged = { playing ->
             if (nasPlaybackSource != null) isNasPaused = !playing
         }
+        // 미디어키/헤드유닛/알림에서 정지된 경우(큐는 남아 항목 전환 이벤트가 없다) 화면도 내린다.
+        player.onStoppedExternally = {
+            if (nasPlaybackSource != null) isNasPaused = true else playingStationId = null
+        }
         // 차량/블루투스의 이전·다음 버튼으로 서비스가 채널을 바꾸거나, 블루투스 끊김으로 큐가
         // 비면 폰 화면도 따라간다. (rc1 검증에서 서비스는 SBS로 넘어갔는데 화면은 KBS로 남았다)
         // 인밴드(ICY) 채널: 서비스가 재생 연결에서 받은 곡 제목/커버를 그대로 쓴다(별도 조회 없음).
@@ -638,7 +642,15 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         nowPlaying = NowPlayingInfo("정보 없음", "정보 없음", null)
         isLoadingMetadata = true
         try {
-            if (!repository.isInbandMetadataStation(stationId)) repository.fetchMetadata(stationId)?.let { nowPlaying = it }
+            if (repository.isInbandMetadataStation(stationId)) {
+                // 인밴드 채널: 세션이 이미 이 채널의 곡 정보를 갖고 있으면(앱을 다시 열었거나 차량이
+                // 채널을 바꾼 경우) 그대로 가져온다. 다음 곡 변경 이벤트만 기다리면 그때까지 "정보 없음"이다.
+                if (player.currentMediaId() == stationId) {
+                    player.currentTitle()?.takeIf { it.isNotBlank() }?.let { title ->
+                        nowPlaying = NowPlayingInfo(title, player.currentArtist() ?: player.currentSubtitle() ?: "", player.currentArtworkUri())
+                    }
+                }
+            } else repository.fetchMetadata(stationId)?.let { nowPlaying = it }
         } catch (e: Exception) {
             // 조회 실패: 위에서 넣은 "정보 없음"이 남는다. 재생 중이면 30초 주기 갱신이 다시 시도한다.
         } finally {

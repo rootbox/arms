@@ -43,6 +43,10 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     // 폰이 따로 조회하지 않고 이 값을 그대로 보여준다.
     var onNowPlayingChanged: ((title: String?, subtitle: String?, artist: String?, artworkUri: String?) -> Unit)? = null
 
+    // 외부(미디어키·헤드유닛·알림)에서 정지돼 플레이어가 IDLE이 됐을 때. 큐는 남아 있어 항목 전환
+    // 이벤트가 없으므로, 폰 화면이 "재생 중" 표시를 내리려면 이 신호가 필요하다.
+    var onStoppedExternally: (() -> Unit)? = null
+
     private var controller: MediaController? = null
     private val pending = ArrayDeque<(MediaController) -> Unit>()
     private var released = false
@@ -50,6 +54,9 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) { onIsPlayingChanged?.invoke(isPlaying) }
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_IDLE && !released) onStoppedExternally?.invoke()
+        }
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             onMediaIdChanged?.invoke(mediaItem?.mediaId)
             onTrackChanged?.invoke(
@@ -132,7 +139,10 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     fun isPlaying(): Boolean = controller?.isPlaying == true
     fun isConnected(): Boolean = controller != null
     fun currentTitle(): String? = controller?.currentMediaItem?.mediaMetadata?.title?.toString()
+    fun currentSubtitle(): String? = controller?.currentMediaItem?.mediaMetadata?.subtitle?.toString()
+    fun currentArtist(): String? = controller?.currentMediaItem?.mediaMetadata?.artist?.toString()
     fun currentArtworkUri(): String? = controller?.currentMediaItem?.mediaMetadata?.artworkUri?.toString()
+    fun isIdle(): Boolean = controller?.playbackState == Player.STATE_IDLE
 
     // 앱을 열자마자 "이미 재생 중인가"를 판단하려면 컨트롤러 연결(비동기)을 잠깐 기다려야 한다.
     suspend fun awaitConnected(timeoutMs: Long = 3_000L): Boolean =
@@ -158,7 +168,8 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     override fun nextTrack() { controller?.let { if (it.hasNextMediaItem()) it.seekToNextMediaItem() } }
     override fun previousTrack() { controller?.let { if (it.hasPreviousMediaItem()) it.seekToPreviousMediaItem() } }
     override fun pause() { controller?.pause() }
-    override fun resume() { controller?.play() }
+    // 외부 STOP으로 IDLE이 된 뒤에는 prepare()가 있어야 다시 재생된다(큐는 남아 있음).
+    override fun resume() { controller?.let { if (it.playbackState == Player.STATE_IDLE) it.prepare(); it.play() } }
     override fun currentPositionMs(): Long = controller?.currentPosition ?: 0L
     override fun durationMs(): Long {
         val d = controller?.duration ?: C.TIME_UNSET
