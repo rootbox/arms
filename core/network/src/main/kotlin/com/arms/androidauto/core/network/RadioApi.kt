@@ -237,12 +237,15 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         // 예전엔 직렬이라 1차가 죽어 있으면 그 타임아웃을 다 기다린 뒤에야 2차를 봤고, 전부 실패해도
         // 1차 URL을 "선택"으로 5분 캐시해 무음이 고착됐다. 성공한 경우에만 기억한다.
         val pool = java.util.concurrent.Executors.newFixedThreadPool(candidates.size)
-        val alive = try {
-            candidates.map { url -> pool.submit(java.util.concurrent.Callable { isStreamAlive(url) }) }
-                .map { f -> runCatching { f.get(7, TimeUnit.SECONDS) }.getOrDefault(false) }
+        var chosen: String? = null
+        try {
+            val futures = candidates.map { url -> pool.submit(java.util.concurrent.Callable { isStreamAlive(url) }) }
+            // 우선순위 순으로 확인하되, 앞 후보가 살아 있으면 뒤 후보 응답(느린 망에선 수 초)을 기다리지 않는다.
+            for ((url, f) in candidates.zip(futures)) {
+                if (runCatching { f.get(7, TimeUnit.SECONDS) }.getOrDefault(false)) { chosen = url; break }
+            }
         } finally { pool.shutdownNow() }
-        val chosen = candidates.zip(alive).firstOrNull { it.second }?.first
-        if (chosen != null) aliveChoice[key] = chosen to System.currentTimeMillis()
+        chosen?.let { aliveChoice[key] = it to System.currentTimeMillis() }
         return chosen ?: candidates.first()
     }
 
