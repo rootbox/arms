@@ -436,7 +436,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         coroutineScope.launch {
             isLoadingMetadata = true
             try {
-                repository.fetchMetadata(stationId)?.let { nowPlaying = it }
+                if (!repository.isInbandMetadataStation(stationId)) repository.fetchMetadata(stationId)?.let { nowPlaying = it }
             } catch (e: Exception) {
                 // 에러 시 기존 값 유지
             } finally {
@@ -587,6 +587,13 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         }
         // 차량/블루투스의 이전·다음 버튼으로 서비스가 채널을 바꾸거나, 블루투스 끊김으로 큐가
         // 비면 폰 화면도 따라간다. (rc1 검증에서 서비스는 SBS로 넘어갔는데 화면은 KBS로 남았다)
+        // 인밴드(ICY) 채널: 서비스가 재생 연결에서 받은 곡 제목/커버를 그대로 쓴다(별도 조회 없음).
+        player.onNowPlayingChanged = { title, subtitle, artist, artworkUri ->
+            val id = playingStationId
+            if (id != null && repository.isInbandMetadataStation(id) && !title.isNullOrBlank()) {
+                nowPlaying = NowPlayingInfo(programTitle = title, currentSong = artist ?: subtitle ?: "", imageUrl = artworkUri)
+            }
+        }
         player.onMediaIdChanged = { mediaId ->
             when {
                 mediaId == null -> { playingStationId = null; nasPlaybackSource = null }
@@ -631,7 +638,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         nowPlaying = NowPlayingInfo("정보 없음", "정보 없음", null)
         isLoadingMetadata = true
         try {
-            repository.fetchMetadata(stationId)?.let { nowPlaying = it }
+            if (!repository.isInbandMetadataStation(stationId)) repository.fetchMetadata(stationId)?.let { nowPlaying = it }
         } catch (e: Exception) {
             // 조회 실패: 위에서 넣은 "정보 없음"이 남는다. 재생 중이면 30초 주기 갱신이 다시 시도한다.
         } finally {
@@ -647,7 +654,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         while (true) {
             delay(30_000L)
             try {
-                repository.fetchMetadata(stationId)?.let { nowPlaying = it }
+                if (!repository.isInbandMetadataStation(stationId)) repository.fetchMetadata(stationId)?.let { nowPlaying = it }
             } catch (e: Exception) {
                 // 다음 주기에 다시 시도
             }

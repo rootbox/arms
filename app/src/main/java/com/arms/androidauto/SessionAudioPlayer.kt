@@ -39,6 +39,10 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     // 변경"이 생겼기 때문에, 폰 화면은 자기 상태를 스스로 정하지 말고 세션을 따라야 한다.
     var onMediaIdChanged: ((mediaId: String?) -> Unit)? = null
 
+    // 서비스가 현재 항목의 정보(곡 제목·커버 등)를 갱신했을 때. 인밴드(ICY) 채널의 곡 정보는
+    // 폰이 따로 조회하지 않고 이 값을 그대로 보여준다.
+    var onNowPlayingChanged: ((title: String?, subtitle: String?, artist: String?, artworkUri: String?) -> Unit)? = null
+
     private var controller: MediaController? = null
     private val pending = ArrayDeque<(MediaController) -> Unit>()
     private var released = false
@@ -55,6 +59,12 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
         }
         override fun onPlayerError(error: PlaybackException) {
             onPlaybackError?.invoke(error.message ?: "스트림 재생에 실패했습니다.")
+        }
+        override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+            onNowPlayingChanged?.invoke(
+                mediaMetadata.title?.toString(), mediaMetadata.subtitle?.toString(),
+                mediaMetadata.artist?.toString(), mediaMetadata.artworkUri?.toString()
+            )
         }
     }
 

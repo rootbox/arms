@@ -81,7 +81,12 @@ class StationRepository(context: Context) {
     // 곡별 커버가 없는 스트리밍 채널(발라드/2세대)은 회색 대신 채널 아트를 보여준다.
     // 앱에 번들된 리소스라 네트워크 없이 항상 정확하다. 폰(Coil)·차량(서비스 loadArtwork) 모두
     // android.resource:// URI를 읽을 수 있다.
-    private fun defaultArtworkUri(stationId: String): String? {
+    fun isInbandMetadataStation(stationId: String): Boolean = radioApiService.isInbandMetadataStation(stationId)
+
+    suspend fun lookupTrackArtwork(streamTitle: String): String? =
+        withContext(Dispatchers.IO) { radioApiService.lookupTrackArtwork(streamTitle) }
+
+    fun defaultArtworkUri(stationId: String): String? {
         val res = when (stationId) {
             "4" -> R.drawable.art_kpop_ballad
             "5" -> R.drawable.art_kpop_rewind

@@ -9,6 +9,8 @@ import androidx.car.app.connection.CarConnection
 import androidx.lifecycle.Observer
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Metadata
+import androidx.media3.extractor.metadata.icy.IcyInfo
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -274,6 +276,21 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 끊기고 다시 시작되지 않는" 증상으로 이어진다. 에러 발생 시 잠시 후 같은 채널을
         // 새로 서명된 URL로 다시 재생 시도하도록 한다.
         player.addListener(object : Player.Listener {
+            // 발라드/2세대 채널의 곡 정보는 재생 연결에 실려 오는 ICY 메타데이터로 받는다.
+            // 별도 연결로 8초마다 스트림을 다시 여는 것보다 빠르고, 서버에 부담도 주지 않는다.
+            override fun onMetadata(metadata: Metadata) {
+                for (i in 0 until metadata.length()) {
+                    val entry = metadata.get(i)
+                    if (entry is IcyInfo) {
+                        val title = entry.title?.trim().orEmpty()
+                        val stationId = player.currentMediaItem?.mediaId ?: return
+                        if (title.isNotEmpty() && stationRepository.isInbandMetadataStation(stationId)) {
+                            applyInbandTitle(stationId, title)
+                        }
+                    }
+                }
+            }
+
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 val mediaId = player.currentMediaItem?.mediaId ?: return
                 // 재시도가 무한히 반복되지 않도록 짧은 시간 안의 연속 실패는 끊는다.
@@ -294,10 +311,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                         } else {
                             val station = stationRepository.getAllStations().first().find { it.id == mediaId }
                                 ?: return@launch
-                            val newItem = buildEnrichedMediaItem(station)
-                            player.setMediaItem(newItem)
+                            player.setMediaItem(quickPlayableItem(station))
                             player.prepare()
                             player.play()
+                            scheduleImmediateRefresh()
                         }
                     } catch (e: Exception) {
                         // 이번 재시도가 실패해도, 다시 에러가 나면 onPlayerError가 또 호출되어
@@ -443,6 +460,14 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // stationId가 null이면 라디오가 아닌 재생(NAS 음악)이므로 보정을 끈다.
     private fun applyLoudnessCompensation(stationId: String?) {
         try {
+            // SBS가 아니면 이펙트를 아예 붙이지 않는다. 오디오 세션에 이펙트가 붙으면 일부 기기에서
+            // 오프로드 경로가 빠지거나 무음이 되는 보고가 있고, 다른 채널엔 보정이 필요 없다.
+            if (stationId != sbsStationId) {
+                loudnessEnhancer?.let { runCatching { it.enabled = false; it.release() } }
+                loudnessEnhancer = null
+                loudnessEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
+                return
+            }
             val sessionId = player.audioSessionId
             if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
             if (loudnessEnhancer == null || loudnessEnhancerSessionId != sessionId) {
@@ -662,6 +687,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // NAS mediaId를 방송국 ID로 착각해 라디오 메타데이터 API를 주기적으로 호출한다.
         if (MediaIdScheme.isNas(currentItem.mediaId)) return
         val stationId = currentItem.mediaId
+        // 인밴드(ICY) 채널은 재생 연결이 곡 정보를 준다(onMetadata). 여기서 스트림을 또 열지 않는다.
+        if (stationRepository.isInbandMetadataStation(stationId)) return
 
         // 조회가 실패하면 아무것도 바꾸지 않는다. 예전에는 실패가 "정보 없음"이라는 값으로 돌아와
         // "정보가 바뀌었다"로 판정되고, 그 결과 멀쩡한 커버까지 지워졌다.
@@ -767,24 +794,14 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 // 누르고도 한참 소리가 안 바뀌고, 그 사이 실패하면 전환 자체가 무산된다.
                 // 새로 서명된 URL만 받아 경량 항목으로 즉시 재생을 시작하면, 주기 갱신 루프
                 // (refreshCurrentNowPlaying)가 편성/커버를 곧 채워 넣는다.
-                val freshUrl = withContext(Dispatchers.IO) { stationRepository.getPlaybackUrl(nextStation.id) }
-                    ?: nextStation.frequencyOrUrl
-                applyLoudnessCompensation(nextStation.id)
-                val quickItem = createPlayableItem(nextStation).buildUpon()
-                    .setUri(android.net.Uri.parse(freshUrl))
-                    // 브라우징용 부제("일반 주파수")가 잠깐 노출되지 않도록 비워 둔다. 갱신 루프가 곧 채운다.
-                    .setMediaMetadata(createPlayableItem(nextStation).mediaMetadata.buildUpon().setSubtitle(null).build())
-                    .build()
-                appliedStationId = null
+                val quickItem = quickPlayableItem(nextStation)
                 player.setMediaItem(quickItem)
                 player.prepare()
                 player.play()
                 stationRepository.saveLastPlayedStationId(nextStation.id)
                 playbackStateStore.saveLastPlayed(LastPlayed.Radio(nextStation.id))
                 android.util.Log.i("ARMS", "채널 전환 완료 → ${nextStation.id}")
-                // 다음 주기(최대 8초)를 기다리지 않고 편성/곡/커버를 바로 채운다.
-                // (재생이 시작돼야 갱신 루프의 isPlaying 가드를 통과하므로 잠깐 뒤에)
-                serviceScope.launch { delay(1_500L); refreshCurrentNowPlaying() }
+                scheduleImmediateRefresh()
             } catch (e: Exception) {
                 android.util.Log.w("ARMS", "채널 전환 실패 (direction=$direction)", e)
             }
@@ -984,7 +1001,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             val allStations = stationRepository.getAllStations().first()
             val station = allStations.find { it.id == lastStationId } ?: allStations.firstOrNull()
             val items = station?.let {
-                val item = withTimeoutOrNull(4000L) { buildEnrichedMediaItem(it) } ?: createPlayableItem(it)
+                val item = withTimeoutOrNull(6000L) { quickPlayableItem(it) } ?: createPlayableItem(it)
+                scheduleImmediateRefresh()
                 ImmutableList.of(item)
             } ?: ImmutableList.of()
             // startPositionMs를 0으로 고정하면, 방송사 스트림이 되감기 가능한 DVR 버퍼를
@@ -1117,9 +1135,56 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             ?: return emptyList()
         stationRepository.saveLastPlayedStationId(station.id)
         playbackStateStore.saveLastPlayed(LastPlayed.Radio(station.id))
-        val enrichedItem = buildEnrichedMediaItem(station)
-        enrichedItem.mediaMetadata.artworkUri?.let { grantArtworkUriTo(controllerPackage, it) }
-        return listOf(enrichedItem)
+        // 편성·곡·커버를 다 받은 뒤에 재생하면(예전 방식) 느린 망에서 수십 초 뒤에야 소리가 났다.
+        // 새 URL만 받아 바로 재생하고, 정보는 갱신 루프(1.5초 뒤 즉시 1회 + 8초 주기)가 채운다.
+        val item = quickPlayableItem(station)
+        scheduleImmediateRefresh()
+        return listOf(item)
+    }
+
+    // 재생을 바로 시작할 수 있는 최소 항목: 새로 서명된 URL + 채널명. 라우드니스는 SBS만.
+    private suspend fun quickPlayableItem(station: Station): MediaItem {
+        val freshUrl = withContext(Dispatchers.IO) { stationRepository.getPlaybackUrl(station.id) }
+            ?: station.frequencyOrUrl
+        applyLoudnessCompensation(station.id)
+        appliedStationId = null
+        val base = createPlayableItem(station)
+        return base.buildUpon()
+            .setUri(android.net.Uri.parse(freshUrl))
+            .setMediaMetadata(base.mediaMetadata.buildUpon().setSubtitle(null).build())
+            .build()
+    }
+
+    private fun scheduleImmediateRefresh() {
+        serviceScope.launch { delay(1_500L); refreshCurrentNowPlaying() }
+    }
+
+    // 인밴드 ICY 제목 반영: 제목은 즉시, 곡 커버는 비동기(없으면 채널 아트).
+    private fun applyInbandTitle(stationId: String, streamTitle: String) {
+        serviceScope.launch {
+            if (player.currentMediaItem?.mediaId != stationId) return@launch
+            if (appliedStationId == stationId && appliedProgramTitle == streamTitle) return@launch
+            val station = stationRepository.getAllStations().first().find { it.id == stationId } ?: return@launch
+            val latest = player.currentMediaItem ?: return@launch
+            val channelArt = stationRepository.defaultArtworkUri(stationId)?.let { loadArtwork(it, stationId) }
+            channelArt?.let { grantArtworkUriToAllControllers(it) }
+            val md = latest.mediaMetadata.buildUpon()
+                .setTitle(streamTitle).setSubtitle(station.name).setArtist(station.name)
+                .setArtworkUri(channelArt).build()
+            player.replaceMediaItem(player.currentMediaItemIndex, latest.buildUpon().setMediaMetadata(md).build())
+            appliedStationId = stationId; appliedProgramTitle = streamTitle; appliedCurrentSong = station.name
+            android.util.Log.d("ARMS", "ICY 반영 $stationId: $streamTitle")
+
+            val cover = stationRepository.lookupTrackArtwork(streamTitle) ?: return@launch
+            val art = loadArtwork(cover, stationId) ?: return@launch
+            if (player.currentMediaItem?.mediaId != stationId || appliedProgramTitle != streamTitle) return@launch
+            val cur = player.currentMediaItem ?: return@launch
+            grantArtworkUriToAllControllers(art)
+            player.replaceMediaItem(
+                player.currentMediaItemIndex,
+                cur.buildUpon().setMediaMetadata(cur.mediaMetadata.buildUpon().setArtworkUri(art).build()).build()
+            )
+        }
     }
 
     // NAS 앨범 전체를 재생 큐로. 라우드니스 보정은 라디오(SBS) 전용이므로 여기서 꺼준다.

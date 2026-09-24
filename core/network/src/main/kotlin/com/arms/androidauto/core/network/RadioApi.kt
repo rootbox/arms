@@ -60,6 +60,13 @@ interface RadioApiService {
 
     // 재생 직전에 호출하여 항상 유효한(만료되지 않은) 스트림 URL을 새로 받아옴
     fun getPlaybackUrl(stationId: String): String?
+
+    // 곡 정보를 스트림 자체의 ICY 메타데이터(재생 연결에 실려 옴)로 받는 채널인지.
+    // 이런 채널은 플레이어가 곡 제목을 직접 알려주므로 별도 폴링 연결을 열 필요가 없다.
+    fun isInbandMetadataStation(stationId: String): Boolean = false
+
+    // "아티스트 - 곡" 문자열로 앨범 커버 URL을 찾는다(없으면 null). 인밴드 채널의 곡이 바뀔 때 호출.
+    fun lookupTrackArtwork(streamTitle: String): String? = null
 }
 
 class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
@@ -212,9 +219,9 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         client.newBuilder().apply {
             interceptors().removeAll { it is okhttp3.logging.HttpLoggingInterceptor }
             networkInterceptors().removeAll { it is okhttp3.logging.HttpLoggingInterceptor }
-            connectTimeout(5, TimeUnit.SECONDS)
-            readTimeout(8, TimeUnit.SECONDS)
-            callTimeout(15, TimeUnit.SECONDS)
+            connectTimeout(3, TimeUnit.SECONDS)
+            readTimeout(5, TimeUnit.SECONDS)
+            callTimeout(6, TimeUnit.SECONDS)
         }.build()
     }
 
@@ -226,10 +233,22 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         if (candidates.size == 1) return candidates.first()
         val key = candidates.first()
         aliveChoice[key]?.let { (url, at) -> if (System.currentTimeMillis() - at < 5 * 60_000L) return url }
-        val chosen = candidates.firstOrNull { isStreamAlive(it) } ?: candidates.first()
-        aliveChoice[key] = chosen to System.currentTimeMillis()
-        return chosen
+        // 후보를 동시에 두드려 재생 시작 전 대기를 한 후보의 타임아웃(최대 6초)으로 묶는다.
+        // 예전엔 직렬이라 1차가 죽어 있으면 그 타임아웃을 다 기다린 뒤에야 2차를 봤고, 전부 실패해도
+        // 1차 URL을 "선택"으로 5분 캐시해 무음이 고착됐다. 성공한 경우에만 기억한다.
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(candidates.size)
+        val alive = try {
+            candidates.map { url -> pool.submit(java.util.concurrent.Callable { isStreamAlive(url) }) }
+                .map { f -> runCatching { f.get(7, TimeUnit.SECONDS) }.getOrDefault(false) }
+        } finally { pool.shutdownNow() }
+        val chosen = candidates.zip(alive).firstOrNull { it.second }?.first
+        if (chosen != null) aliveChoice[key] = chosen to System.currentTimeMillis()
+        return chosen ?: candidates.first()
     }
+
+    override fun isInbandMetadataStation(stationId: String): Boolean = stationId == "4" || stationId == "5"
+
+    override fun lookupTrackArtwork(streamTitle: String): String? = fetchStreamTrackArtwork(streamTitle)
 
     private fun isStreamAlive(url: String): Boolean = try {
         val request = Request.Builder().url(url).header("User-Agent", streamUserAgent).build()
@@ -547,7 +566,15 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         return result
     }
 
+    @Volatile private var kpopMetadataCache: Pair<StationApiResponse, Long>? = null
+
+    // 서비스(8초)·폰(30초) 루프가 각각 게이트웨이 웹소켓을 새로 열지 않도록 20초간 재사용한다.
     private fun kpopMetadata(): StationApiResponse {
+        kpopMetadataCache?.let { (r, at) -> if (System.currentTimeMillis() - at < 20_000L) return r }
+        return kpopMetadataUncached().also { kpopMetadataCache = it to System.currentTimeMillis() }
+    }
+
+    private fun kpopMetadataUncached(): StationApiResponse {
         // 커버는 게이트웨이가 곡과 함께 정확히 알려준다. 예전 방식(SSE로 제목만 받고 GraphQL
         // 검색으로 커버를 찾기)은 실측에서 유명곡 6곡 중 5곡의 커버를 못 찾았다 - 검색이
         // 제목을 잘 매칭하지 못한다. 게이트웨이가 안 될 때만 예전 경로로 폴백한다.
