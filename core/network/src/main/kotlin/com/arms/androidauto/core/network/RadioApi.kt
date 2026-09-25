@@ -98,7 +98,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     // LISTEN.moe의 K-POP 24시간 논스톱 스트림. 만료 토큰이 없는 고정 주소.
     private val kpopStreamUrl = "https://listen.moe/kpop/stream"
 
-    // K-POP 발라드 24/7. 1차는 국내 개인 서버(sCast.kr, Shoutcast DNAS 엔드포인트 — Steamcast
+    // KPOP BALLAD. 1차는 국내 개인 서버(sCast.kr, Shoutcast DNAS 엔드포인트 — Steamcast
     // 마운트는 ICY 요청에 비표준 상태줄을 돌려주므로 쓰지 않는다), 2차는 laut.fm(GEMA 정산 플랫폼).
     // 개인 서버는 예고 없이 사라질 수 있어 재생 직전에 살아있는 쪽을 고른다.
     private val balladStreamUrls = listOf(
@@ -110,8 +110,10 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
     // 막지만 OkHttp/ExoPlayer/libVLC 기본 UA는 통과한다(User-Agent를 Mozilla로 바꾸지 말 것).
     private val rewindStreamUrls = listOf("https://stream.zeno.fm/hkrivfrongdvv")
 
-    private val balladStationName = "K-POP 발라드 24/7"
-    private val rewindStationName = "K-POP 2세대 히트 24/7"
+    // 채널 이름은 차량 디스플레이(글자 수가 적음)에서 잘리지 않도록 짧게 유지한다.
+    // 실차에서 "K-POP 2세대 히트 24/7" 같은 이름이 잘려 보였다(2026-09-25).
+    private val balladStationName = "KPOP BALLAD"
+    private val rewindStationName = "KPOP 8090 HIT"
 
     override fun getStations(): List<StationApiResponse> {
         val kbsStreamUrl = fetchKbsLiveStreamUrl() ?: fallbackStreamUrl
@@ -121,21 +123,21 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         return listOfNotNull(
             StationApiResponse(
                 id = "1",
-                name = "KBS Cool FM (89.1 MHz)",
+                name = "KBS Cool FM",
                 streamUrl = kbsStreamUrl,
                 type = "RADIO"
             ),
             sbsStreamUrl?.let {
                 StationApiResponse(
                     id = "2",
-                    name = "SBS 파워FM (107.7 MHz)",
+                    name = "SBS 파워FM",
                     streamUrl = it,
                     type = "RADIO"
                 )
             },
             StationApiResponse(
                 id = "3",
-                name = "K-POP 24/7",
+                name = "KPOP NEW HIT",
                 streamUrl = kpopStreamUrl,
                 type = "STREAMING"
             ),
@@ -366,7 +368,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         val current = fetchKbsCurrentProgram()
         return StationApiResponse(
             id = "1",
-            name = "KBS Cool FM (89.1 MHz)",
+            name = "KBS Cool FM",
             streamUrl = fallbackStreamUrl,
             type = "RADIO",
             currentSong = "실시간 방송 중",
@@ -452,7 +454,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         val image = onair?.imageUrl ?: bora?.second ?: onair?.channelImageUrl ?: sbsChannelImageUrl
         return StationApiResponse(
             id = "2",
-            name = "SBS 파워FM (107.7 MHz)",
+            name = "SBS 파워FM",
             streamUrl = fetchSbsLiveStreamUrl() ?: "",
             type = "RADIO",
             currentSong = "실시간 라디오 음원 수신 중",
@@ -596,7 +598,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         val nowPlayingText = nowPlaying?.let { "${it.first} - ${it.second}" }
         return StationApiResponse(
             id = "3",
-            name = "K-POP 24/7",
+            name = "KPOP NEW HIT",
             streamUrl = kpopStreamUrl,
             type = "STREAMING",
             currentSong = "24시간 K-POP 스트리밍",

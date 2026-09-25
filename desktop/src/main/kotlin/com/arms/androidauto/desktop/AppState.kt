@@ -32,11 +32,11 @@ class AppState(private val scope: CoroutineScope) {
     var statusMessage by mutableStateOf<String?>(null)
 
     private val stations = listOf(
-        Triple("1", "KBS Cool FM (89.1 MHz)", "실시간 라디오 방송"),
-        Triple("2", "SBS 파워FM (107.7 MHz)", "실시간 라디오 방송"),
-        Triple("3", "K-POP 24/7", "24/7 온라인 스트리밍"),
-        Triple("4", "K-POP 발라드 24/7", "24/7 온라인 스트리밍"),
-        Triple("5", "K-POP 2세대 히트 24/7", "24/7 온라인 스트리밍"),
+        Triple("1", "KBS Cool FM", "실시간 라디오 방송"),
+        Triple("2", "SBS 파워FM", "실시간 라디오 방송"),
+        Triple("3", "KPOP NEW HIT", "24/7 온라인 스트리밍"),
+        Triple("4", "KPOP BALLAD", "24/7 온라인 스트리밍"),
+        Triple("5", "KPOP 8090 HIT", "24/7 온라인 스트리밍"),
     )
     fun stationList() = stations
 
