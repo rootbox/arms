@@ -50,6 +50,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 // 차량 호스트 앱의 패키지명. 이 목록에 있는 컨트롤러가 모두 빠지면 "차량 연결이 끝났다"로 본다.
+// 잠금화면/알림 미디어 컨트롤과 블루투스 AVRCP 커버아트는 세션의 artworkUri를 자기 프로세스에서 읽는다.
+internal val SYSTEM_ARTWORK_CONSUMERS = setOf("com.android.systemui", "com.android.bluetooth")
+
 internal val CAR_CONTROLLER_PACKAGES = setOf(
     "com.google.android.projection.gearhead", // Android Auto (폰 투영)
     "com.android.car.media", // Automotive OS 미디어 센터
@@ -706,8 +709,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             if (imageUrl == null || currentItem.mediaMetadata.artworkUri != null) return
             // 정보는 그대로인데 커버만 비어 있다: 백오프 간격에 맞춰 커버만 다시 받는다.
             if (artworkRetryStationId == stationId && System.currentTimeMillis() < artworkNextRetryAtMs) return
-            val artworkUri = loadArtwork(imageUrl, stationId)
-            if (artworkUri == null) {
+            val artwork = loadArtwork(imageUrl, stationId)
+            if (artwork == null) {
                 scheduleArtworkRetry(stationId)
                 return
             }
@@ -715,9 +718,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // 받는 사이 채널이 바뀌었으면 엉뚱한 채널에 붙이지 않는다.
             if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
             val latest = player.currentMediaItem ?: return
-            grantArtworkUriToAllControllers(artworkUri)
+            grantArtworkUriToAllControllers(artwork.uri)
             val withArtwork = latest.buildUpon()
-                .setMediaMetadata(latest.mediaMetadata.buildUpon().setArtworkUri(artworkUri).build())
+                .setMediaMetadata(
+                    latest.mediaMetadata.buildUpon().setArtworkUri(artwork.uri)
+                        .setArtworkData(artwork.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER).build()
+                )
                 .build()
             player.replaceMediaItem(player.currentMediaItemIndex, withArtwork)
             return
@@ -726,16 +732,20 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 정보가 바뀌었다 = 새 곡/프로그램. 이전 재시도 상태는 의미가 없다.
         clearArtworkRetry()
 
-        // 변경을 감지해도 바로 반영하지 않고 버퍼링 보정 지연만큼 기다린다. 대기 중 채널이
-        // 바뀌었거나 재생이 멈췄다면, 이제 와서 낡은(혹은 엉뚱한 채널의) 정보를 적용하지 않는다.
-        delay(nowPlayingApplyDelayMs)
+        // 버퍼링 보정 지연은 "같은 채널에서 곡이 바뀐" 경우에만 의미가 있다(K-POP: 곡 정보가 소리보다
+        // 먼저 도착). 채널을 막 켰거나 바꾼 직후의 첫 반영과 지상파 프로그램명까지 4초를 기다리면
+        // 차량 화면에 정보가 늦게 뜬다. 대기 중 채널이 바뀌었거나 멈췄다면 낡은 정보를 적용하지 않는다.
+        val isSameStationSongChange = appliedStationId == stationId &&
+            (stationRepository.getAllStations().first().find { it.id == stationId }?.type
+                == com.arms.androidauto.core.model.StationType.STREAMING)
+        if (isSameStationSongChange) delay(nowPlayingApplyDelayMs)
         if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
 
-        val artworkUri = imageUrl?.let { loadArtwork(it, stationId) }
+        val artwork = imageUrl?.let { loadArtwork(it, stationId) }
         // 커버가 있어야 하는데 못 받았다면 다음 주기부터 커버만 다시 시도한다.
-        if (artworkUri == null && imageUrl != null) scheduleArtworkRetry(stationId)
+        if (artwork == null && imageUrl != null) scheduleArtworkRetry(stationId)
 
-        artworkUri?.let { grantArtworkUriToAllControllers(it) }
+        artwork?.let { grantArtworkUriToAllControllers(it.uri) }
 
         // 이 시점은 이미 프로그램/곡 정보가 실제로 바뀐 경우이므로, 새 이미지를 못 찾았다면
         // (예: K-POP 곡이 DB에 커버가 없는 경우) 이전 곡의 이미지를 계속 보여주지 않고 지운다.
@@ -759,7 +769,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             )
             .setSubtitle(streamingStation?.name ?: nowPlaying.programTitle)
             .setArtist(streamingStation?.name ?: nowPlaying.currentSong)
-            .setArtworkUri(artworkUri)
+            .setArtworkUri(artwork?.uri)
+            .setArtworkData(artwork?.data, artwork?.let { MediaMetadata.PICTURE_TYPE_FRONT_COVER })
             .build()
 
         val updatedItem = latest.buildUpon().setMediaMetadata(updatedMetadata).build()
@@ -818,9 +829,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         val nowPlaying = withContext(Dispatchers.IO) { stationRepository.fetchMetadata(station.id) }
         val imageUrl = nowPlaying?.imageUrl
 
-        val artworkUri = imageUrl?.let { loadArtwork(it, station.id) }
-        if (artworkUri == null && imageUrl != null) scheduleArtworkRetry(station.id) else clearArtworkRetry()
-        artworkUri?.let { grantArtworkUriToAllControllers(it) }
+        val artwork = imageUrl?.let { loadArtwork(it, station.id) }
+        if (artwork == null && imageUrl != null) scheduleArtworkRetry(station.id) else clearArtworkRetry()
+        artwork?.let { grantArtworkUriToAllControllers(it.uri) }
 
         val isStreaming = station.type == com.arms.androidauto.core.model.StationType.STREAMING
         appliedStationId = station.id
@@ -838,7 +849,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
-            .apply { artworkUri?.let { setArtworkUri(it) } }
+            .apply { artwork?.let { setArtworkUri(it.uri); setArtworkData(it.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
             .build()
 
         return MediaItem.Builder()
@@ -853,6 +864,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         mediaLibrarySession.connectedControllers.forEach { controller ->
             grantArtworkUriTo(controller.packageName, uri)
         }
+        // Media3 컨트롤러가 아닌데 세션 메타데이터의 URI를 직접 읽는 시스템 구성요소.
+        SYSTEM_ARTWORK_CONSUMERS.forEach { grantArtworkUriTo(it, uri) }
     }
 
     private fun grantArtworkUriTo(packageName: String, uri: android.net.Uri) {
@@ -1168,10 +1181,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             val station = stationRepository.getAllStations().first().find { it.id == stationId } ?: return@launch
             val latest = player.currentMediaItem ?: return@launch
             val channelArt = stationRepository.defaultArtworkUri(stationId)?.let { loadArtwork(it, stationId) }
-            channelArt?.let { grantArtworkUriToAllControllers(it) }
+            channelArt?.let { grantArtworkUriToAllControllers(it.uri) }
             val md = latest.mediaMetadata.buildUpon()
                 .setTitle(streamTitle).setSubtitle(station.name).setArtist(station.name)
-                .setArtworkUri(channelArt).build()
+                .setArtworkUri(channelArt?.uri)
+                .setArtworkData(channelArt?.data, channelArt?.let { MediaMetadata.PICTURE_TYPE_FRONT_COVER })
+                .build()
             player.replaceMediaItem(player.currentMediaItemIndex, latest.buildUpon().setMediaMetadata(md).build())
             appliedStationId = stationId; appliedProgramTitle = streamTitle; appliedCurrentSong = station.name
             android.util.Log.d("ARMS", "ICY 반영 $stationId: $streamTitle")
@@ -1180,10 +1195,13 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             val art = loadArtwork(cover, stationId) ?: return@launch
             if (player.currentMediaItem?.mediaId != stationId || appliedProgramTitle != streamTitle) return@launch
             val cur = player.currentMediaItem ?: return@launch
-            grantArtworkUriToAllControllers(art)
+            grantArtworkUriToAllControllers(art.uri)
             player.replaceMediaItem(
                 player.currentMediaItemIndex,
-                cur.buildUpon().setMediaMetadata(cur.mediaMetadata.buildUpon().setArtworkUri(art).build()).build()
+                cur.buildUpon().setMediaMetadata(
+                    cur.mediaMetadata.buildUpon().setArtworkUri(art.uri)
+                        .setArtworkData(art.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER).build()
+                ).build()
             )
         }
     }
@@ -1264,15 +1282,44 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     }
 
     // 커버 URL을 내려받아 다른 프로세스가 읽을 수 있는 content:// URI로 만든다. 실패하면 null.
-    private suspend fun loadArtwork(url: String, stationId: String): android.net.Uri? {
+    // 커버 하나: 다른 프로세스가 읽을 수 있는 content:// URI + 메타데이터에 직접 싣는 축소 JPEG 바이트.
+    // 실차 로그에서 SystemUI(잠금화면 미디어 컨트롤)가 우리 content:// URI를 읽으려다 권한 없이 106회
+    // 실패했고, 블루투스 커버아트(BIP)도 같은 경로에 기댄다. 바이트를 artworkData로 함께 실으면
+    // 세션 레거시 메타데이터에 비트맵이 곧바로 들어가 URI 접근 없이도 어디서나 커버가 보인다.
+    private class Artwork(val uri: android.net.Uri, val data: ByteArray)
+
+    private suspend fun loadArtwork(url: String, stationId: String): Artwork? {
         val bytes = withContext(Dispatchers.IO) {
             // 번들된 채널 아트(android.resource://)는 네트워크가 아니라 리소스에서 읽는다.
             if (url.startsWith("android.resource://")) {
                 runCatching { contentResolver.openInputStream(android.net.Uri.parse(url))?.use { it.readBytes() } }.getOrNull()
             } else fetchArtworkBytes(url)
         } ?: return null
-        return createArtworkContentUri(bytes, stationId)
+        // 블루투스 BIP 전송은 느리고(수십 KB도 수 초), 세션 비트맵도 320px면 충분하다.
+        val small = withContext(Dispatchers.Default) { downscaleArtwork(bytes) }
+        val uri = createArtworkContentUri(small, stationId) ?: return null
+        return Artwork(uri, small)
     }
+
+    // 긴 변 maxPx 이하 JPEG로 축소. 디코딩 실패 시 원본을 그대로 쓴다.
+    private fun downscaleArtwork(bytes: ByteArray, maxPx: Int = 320): ByteArray = try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) bytes else {
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= maxPx && bounds.outHeight / (sample * 2) >= maxPx) sample *= 2
+            val decoded = android.graphics.BitmapFactory.decodeByteArray(
+                bytes, 0, bytes.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+            )
+            if (decoded == null) bytes else {
+                val scale = minOf(1f, maxPx.toFloat() / maxOf(decoded.width, decoded.height))
+                val out = if (scale < 1f) android.graphics.Bitmap.createScaledBitmap(
+                    decoded, (decoded.width * scale).toInt().coerceAtLeast(1), (decoded.height * scale).toInt().coerceAtLeast(1), true
+                ) else decoded
+                java.io.ByteArrayOutputStream().also { out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
+            }
+        }
+    } catch (e: Exception) { bytes }
 
     private fun scheduleArtworkRetry(stationId: String) {
         if (artworkRetryStationId != stationId) {
@@ -1343,7 +1390,11 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // mediaId를 그대로 파일명에 쓰면 NAS 앨범명처럼 `/`나 `-`가 들어간 값에서
             // 경로가 깨지거나 이전 파일 정리(prefix 매칭)가 엉뚱한 파일을 지운다.
             val token = artworkCacheToken(mediaId)
-            artworkDir.listFiles { f -> f.name.startsWith("$token-") }?.forEach { it.delete() }
+            // 이전 파일을 바로 지우면 안 된다. 헤드유닛/SystemUI는 URI를 나중에(블루투스 전송은 수 초 뒤)
+            // 읽는데, 그 사이 곡이 바뀌어 새 파일이 써지면 옛 URI가 사라져 커버가 안 보였다
+            // (발라드/2세대는 채널 아트→곡 커버로 연달아 갱신되어 특히 취약). 최근 3개는 남긴다.
+            artworkDir.listFiles { f -> f.name.startsWith("$token-") }?.sortedBy { it.name }
+                ?.dropLast(2)?.forEach { it.delete() }
             val file = java.io.File(artworkDir, "$token-${System.currentTimeMillis()}.jpg")
             file.writeBytes(bytes)
             androidx.core.content.FileProvider.getUriForFile(
