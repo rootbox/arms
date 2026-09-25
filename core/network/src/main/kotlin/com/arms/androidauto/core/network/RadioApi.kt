@@ -307,7 +307,8 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
             val q = java.net.URLEncoder.encode(cleanTrackQuery(streamTitle), "UTF-8")
             val request = Request.Builder().url("https://api.deezer.com/search?q=$q&limit=1")
                 .header("User-Agent", streamUserAgent).build()
-            client.newCall(request).execute().use { r ->
+            // 공용 client(로깅·10초 타임아웃) 대신 짧은 타임아웃의 스트림 클라이언트로(곡 커버는 2초 안에 못 찾으면 포기).
+            streamClient.newCall(request).execute().use { r ->
                 if (!r.isSuccessful) null
                 else parseDeezerCover(r.body?.string().orEmpty(), streamTitle)
             }
@@ -455,7 +456,7 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         return StationApiResponse(
             id = "2",
             name = "SBS 파워FM",
-            streamUrl = fetchSbsLiveStreamUrl() ?: "",
+            streamUrl = "", // 편성 조회에 스트림 URL은 쓰이지 않는다(재생 URL은 getPlaybackUrl). 매 폴링마다 서명 URL을 새로 받지 않는다.
             type = "RADIO",
             currentSong = "실시간 라디오 음원 수신 중",
             programTitle = title ?: "SBS 파워FM 실시간 방송",

@@ -10,6 +10,9 @@ import androidx.lifecycle.Observer
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Metadata
+import androidx.media3.common.util.BitmapLoader
+import androidx.media3.datasource.DataSourceBitmapLoader
+import androidx.media3.session.CacheBitmapLoader
 import androidx.media3.extractor.metadata.icy.IcyInfo
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
@@ -192,8 +195,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 않아 그 경우 리다이렉트 안내 HTML을 이미지로 저장했다. OkHttp는 따라간다.
     private val artworkHttpClient by lazy {
         okhttp3.OkHttpClient.Builder()
-            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
@@ -332,6 +335,15 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // 포커스(AUDIOFOCUS_LOSS)를 요청했거나 상실이 너무 오래 지속돼 억제가 풀린 경우
             // (SUPPRESSED_TOO_LONG)에는 재개하지 않고 멈춘 채로 남는다 - 음성인식이 끝나도
             // 라디오가 다시 시작되지 않던 원인. 이 경우 포커스가 풀리는 것을 지켜보다 되살린다.
+            // 채널을 켠 직후의 첫 정보 채움은 타이머(1.5초)가 아니라 실제 재생 시작에 맞춘다.
+            // (갱신 루프는 isPlaying이 아니면 건너뛰므로 HLS 버퍼링 중 타이머가 헛돌곤 했다)
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                val id = player.currentMediaItem?.mediaId ?: return
+                if (isPlaying && appliedStationId == null && !MediaIdScheme.isNas(id)) {
+                    serviceScope.launch { refreshCurrentNowPlaying() }
+                }
+            }
+
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY) {
                     val isNas = MediaIdScheme.isNas(player.currentMediaItem?.mediaId)
@@ -377,7 +389,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             this,
             LiveRadioPlayer(player) { direction -> skipToAdjacentStation(direction) },
             LibraryCallback()
-        ).build()
+        )
+            // 기본 로더는 artworkData도 비동기로 디코드해, 세션이 레거시 메타데이터를 "비트맵 없이 1차 →
+            // 디코드 후 2차"로 두 번 내보낸다. 블루투스는 비트맵 유무만 보므로 "커버→없음→커버"가
+            // 연달아 가고 일부 헤드유닛이 마지막 상태를 놓친다. 바이트는 그 자리에서 디코드해 1회로 보낸다.
+            .setBitmapLoader(SyncDecodeBitmapLoader(this))
+            .build()
 
         // 3. 재생 중인 채널의 편성정보/이미지를 주기적으로 다시 확인해 Now Playing 화면에 반영.
         // (재생 시작 시점 한 번만 값을 채우던 기존 방식으로는 방송이 바뀌거나, K-POP처럼
@@ -768,7 +785,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 else RadioDisplayPolicy.sessionTitle(station?.name ?: latest.mediaMetadata.title?.toString().orEmpty(), nowPlaying.programTitle)
             )
             .setSubtitle(streamingStation?.name ?: nowPlaying.programTitle)
-            .setArtist(streamingStation?.name ?: nowPlaying.currentSong)
+            // 지상파 artist도 프로그램명: 블루투스 화면의 둘째 줄이 유의미해지고, 큐 항목(subtitle)과 값이
+            // 같아져 블루투스 스택의 2초 동기화 대기(제목/아티스트 불일치 시)가 사라진다.
+            .setArtist(streamingStation?.name ?: nowPlaying.programTitle)
             .setArtworkUri(artwork?.uri)
             .setArtworkData(artwork?.data, artwork?.let { MediaMetadata.PICTURE_TYPE_FRONT_COVER })
             .build()
@@ -845,7 +864,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 else RadioDisplayPolicy.sessionTitle(station.name, nowPlaying?.programTitle)
             )
             .setSubtitle(if (isStreaming) station.name else (nowPlaying?.programTitle ?: "정보 없음"))
-            .setArtist(if (isStreaming) station.name else (nowPlaying?.currentSong ?: "정보 없음"))
+            .setArtist(if (isStreaming) station.name else (nowPlaying?.programTitle ?: "정보 없음"))
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
@@ -1163,9 +1182,16 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         applyLoudnessCompensation(station.id)
         appliedStationId = null
         val base = createPlayableItem(station)
+        // 발라드/2세대는 채널 아트를 처음부터 싣는다 — 곡 정보(ICY)가 오기 전에도 차량에 커버가 보인다.
+        val art = if (stationRepository.isInbandMetadataStation(station.id)) channelArtwork(station.id) else null
+        art?.let { grantArtworkUriToAllControllers(it.uri) }
         return base.buildUpon()
             .setUri(android.net.Uri.parse(freshUrl))
-            .setMediaMetadata(base.mediaMetadata.buildUpon().setSubtitle(null).build())
+            .setMediaMetadata(
+                base.mediaMetadata.buildUpon().setSubtitle(null)
+                    .apply { art?.let { setArtworkUri(it.uri); setArtworkData(it.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
+                    .build()
+            )
             .build()
     }
 
@@ -1173,36 +1199,27 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         serviceScope.launch { delay(1_500L); refreshCurrentNowPlaying() }
     }
 
-    // 인밴드 ICY 제목 반영: 제목은 즉시, 곡 커버는 비동기(없으면 채널 아트).
+    // 인밴드 ICY 제목 반영: 곡당 교체 1회. 곡 커버(Deezer)를 2초 안에 먼저 찾고, 없으면 채널 아트를
+    // 유지한다. 예전엔 "채널 아트로 교체 → 곡 커버로 다시 교체"라 블루투스가 커버→없음→커버를 연달아
+    // 받아 일부 헤드유닛에서 마지막 상태를 놓쳤다(블루투스는 텍스트가 같으면 커버만 바뀐 갱신을 버림).
     private fun applyInbandTitle(stationId: String, streamTitle: String) {
         serviceScope.launch {
             if (player.currentMediaItem?.mediaId != stationId) return@launch
             if (appliedStationId == stationId && appliedProgramTitle == streamTitle) return@launch
             val station = stationRepository.getAllStations().first().find { it.id == stationId } ?: return@launch
+            val cover = withTimeoutOrNull(2_000L) { stationRepository.lookupTrackArtwork(streamTitle) }
+                ?.let { loadArtwork(it, stationId) }
+            val art = cover ?: channelArtwork(stationId)
+            if (player.currentMediaItem?.mediaId != stationId) return@launch
             val latest = player.currentMediaItem ?: return@launch
-            val channelArt = stationRepository.defaultArtworkUri(stationId)?.let { loadArtwork(it, stationId) }
-            channelArt?.let { grantArtworkUriToAllControllers(it.uri) }
+            art?.let { grantArtworkUriToAllControllers(it.uri) }
             val md = latest.mediaMetadata.buildUpon()
                 .setTitle(streamTitle).setSubtitle(station.name).setArtist(station.name)
-                .setArtworkUri(channelArt?.uri)
-                .setArtworkData(channelArt?.data, channelArt?.let { MediaMetadata.PICTURE_TYPE_FRONT_COVER })
+                .apply { art?.let { setArtworkUri(it.uri); setArtworkData(it.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
                 .build()
             player.replaceMediaItem(player.currentMediaItemIndex, latest.buildUpon().setMediaMetadata(md).build())
             appliedStationId = stationId; appliedProgramTitle = streamTitle; appliedCurrentSong = station.name
-            android.util.Log.d("ARMS", "ICY 반영 $stationId: $streamTitle")
-
-            val cover = stationRepository.lookupTrackArtwork(streamTitle) ?: return@launch
-            val art = loadArtwork(cover, stationId) ?: return@launch
-            if (player.currentMediaItem?.mediaId != stationId || appliedProgramTitle != streamTitle) return@launch
-            val cur = player.currentMediaItem ?: return@launch
-            grantArtworkUriToAllControllers(art.uri)
-            player.replaceMediaItem(
-                player.currentMediaItemIndex,
-                cur.buildUpon().setMediaMetadata(
-                    cur.mediaMetadata.buildUpon().setArtworkUri(art.uri)
-                        .setArtworkData(art.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER).build()
-                ).build()
-            )
+            android.util.Log.d("ARMS", "ICY 반영 $stationId: $streamTitle (cover=${cover != null})")
         }
     }
 
@@ -1282,13 +1299,35 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     }
 
     // 커버 URL을 내려받아 다른 프로세스가 읽을 수 있는 content:// URI로 만든다. 실패하면 null.
+    // artworkData(≤256px JPEG, 수십 KB)는 즉시 디코드해 즉시 완료된 Future로 돌려준다.
+    // URI 로드는 기본 구현(캐시 + DataSource)에 위임한다.
+    private class SyncDecodeBitmapLoader(context: android.content.Context) : BitmapLoader {
+        private val delegate = CacheBitmapLoader(DataSourceBitmapLoader(context))
+        override fun decodeBitmap(data: ByteArray): ListenableFuture<android.graphics.Bitmap> = try {
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.size)
+            if (bmp != null) Futures.immediateFuture(bmp)
+            else Futures.immediateFailedFuture(IllegalArgumentException("artwork decode failed"))
+        } catch (e: Exception) { Futures.immediateFailedFuture(e) }
+        override fun loadBitmap(uri: android.net.Uri): ListenableFuture<android.graphics.Bitmap> = delegate.loadBitmap(uri)
+        override fun supportsMimeType(mimeType: String): Boolean = delegate.supportsMimeType(mimeType)
+    }
+
     // 커버 하나: 다른 프로세스가 읽을 수 있는 content:// URI + 메타데이터에 직접 싣는 축소 JPEG 바이트.
     // 실차 로그에서 SystemUI(잠금화면 미디어 컨트롤)가 우리 content:// URI를 읽으려다 권한 없이 106회
     // 실패했고, 블루투스 커버아트(BIP)도 같은 경로에 기댄다. 바이트를 artworkData로 함께 실으면
     // 세션 레거시 메타데이터에 비트맵이 곧바로 들어가 URI 접근 없이도 어디서나 커버가 보인다.
     private class Artwork(val uri: android.net.Uri, val data: ByteArray)
 
-    private suspend fun loadArtwork(url: String, stationId: String): Artwork? {
+    // 인밴드 채널의 번들 채널 아트는 한 번만 읽어 재사용한다(네트워크 0, 실패 여지 0).
+    private val channelArtCache = HashMap<String, Artwork>()
+    private suspend fun channelArtwork(stationId: String): Artwork? {
+        channelArtCache[stationId]?.let { return it }
+        val url = stationRepository.defaultArtworkUri(stationId) ?: return null
+        // 곡 커버와 같은 토큰을 쓰면 파일 보존(최근 3개) 회전에 밀려 URI가 사라질 수 있어 별도 키를 쓴다.
+        return loadArtwork(url, stationId, cacheKey = "$stationId-channel")?.also { channelArtCache[stationId] = it }
+    }
+
+    private suspend fun loadArtwork(url: String, stationId: String, cacheKey: String = stationId): Artwork? {
         val bytes = withContext(Dispatchers.IO) {
             // 번들된 채널 아트(android.resource://)는 네트워크가 아니라 리소스에서 읽는다.
             if (url.startsWith("android.resource://")) {
@@ -1299,7 +1338,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // GH.MediaPlaybackMonitor: Image exceeded 256x256, omitting it). 블루투스 BIP 전송도 느리므로
         // 256px 이하 JPEG로 맞춘다.
         val small = withContext(Dispatchers.Default) { downscaleArtwork(bytes) }
-        val uri = createArtworkContentUri(small, stationId) ?: return null
+        val uri = createArtworkContentUri(small, cacheKey) ?: return null
         return Artwork(uri, small)
     }
 
