@@ -478,8 +478,8 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
             // BODY 레벨 로깅 인터셉터가 응답 본문을 통째로 peek하려다 끝나지 않는 SSE 스트림에서
             // 무한 대기할 수 있으므로, 공용 client의 인터셉터를 물려받지 않는 별도 클라이언트를 사용
             val sseClient = OkHttpClient.Builder()
-                .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                 .build()
 
             sseClient.newCall(request).execute().use { response ->
@@ -588,11 +588,28 @@ class RadioApiServiceImpl(private val client: OkHttpClient) : RadioApiService {
         // 커버는 게이트웨이가 곡과 함께 정확히 알려준다. 예전 방식(SSE로 제목만 받고 GraphQL
         // 검색으로 커버를 찾기)은 실측에서 유명곡 6곡 중 5곡의 커버를 못 찾았다 - 검색이
         // 제목을 잘 매칭하지 못한다. 게이트웨이가 안 될 때만 예전 경로로 폴백한다.
-        val gatewayTrack = fetchKpopTrackFromGateway()
-        val nowPlaying: Pair<String, String>? =
-            gatewayTrack?.let { it.artist to it.title } ?: fetchKpopNowPlaying()
+        // 실측(2026-09-25): 게이트웨이가 첫 곡 정보를 6초 안에 못 주는 경우가 있고, 그때 SSE 폴백까지
+        // 직렬로 기다리면 18초가 걸렸다. 둘을 동시에 띄워 먼저 오는 쪽을 쓴다. SSE가 먼저 오면
+        // 게이트웨이(커버 포함)를 1.5초만 더 기다린 뒤 곡 정보만으로 진행한다(커버는 다음 주기에).
+        // GraphQL 커버 검색은 적중률이 낮아(6곡 중 1곡) 시간만 쓰므로 하지 않는다.
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        var gatewayTrack: KpopTrack? = null
+        var sseTrack: Pair<String, String>? = null
+        try {
+            val gw = pool.submit(java.util.concurrent.Callable { fetchKpopTrackFromGateway() })
+            val sse = pool.submit(java.util.concurrent.Callable { fetchKpopNowPlaying() })
+            val deadline = System.currentTimeMillis() + 6_500L
+            var sseArrivedAt = 0L
+            while (System.currentTimeMillis() < deadline) {
+                if (gw.isDone) { gatewayTrack = runCatching { gw.get() }.getOrNull(); if (gatewayTrack != null) break }
+                if (sse.isDone && sseTrack == null) { sseTrack = runCatching { sse.get() }.getOrNull(); if (sseTrack != null) sseArrivedAt = System.currentTimeMillis() }
+                if (gw.isDone && sse.isDone) break
+                if (sseTrack != null && System.currentTimeMillis() - sseArrivedAt > 1_500L) break
+                Thread.sleep(100)
+            }
+        } finally { pool.shutdownNow() }
+        val nowPlaying: Pair<String, String>? = gatewayTrack?.let { it.artist to it.title } ?: sseTrack
         val imageUrl = gatewayTrack?.coverUrl
-            ?: nowPlaying?.second?.let { if (gatewayTrack == null) fetchKpopCoverImage(it) else null }
         // KBS/SBS와 동일하게, 실제로 화면에 노출되는 필드(programTitle -> subtitle)에
         // 실시간 곡 정보를 담는다. 이전에는 이 값이 항상 고정 문구였고, 실시간 곡 정보는
         // 화면에 노출되지 않는 currentSong(artist) 필드에만 담겨 있어 갱신이 반영되지 않았다.
