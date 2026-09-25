@@ -340,7 +340,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 val id = player.currentMediaItem?.mediaId ?: return
                 if (isPlaying && appliedStationId == null && !MediaIdScheme.isNas(id)) {
-                    serviceScope.launch { refreshCurrentNowPlaying() }
+                    serviceScope.launch { refreshCurrentNowPlaying(initial = true) }
                 }
             }
 
@@ -701,8 +701,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 현재 재생 중인 미디어 아이템의 편성정보/곡정보/이미지를 다시 가져와,
     // 실제로 바뀐 경우에만 세션의 MediaItem을 교체해 Now Playing 화면을 갱신한다.
     // player.replaceMediaItem은 동일 URI에 대해서는 재생을 끊지 않고 메타데이터만 반영한다.
-    private suspend fun refreshCurrentNowPlaying() {
-        if (!player.isPlaying) return
+    // initial=true: 채널을 막 켠/바꾼 직후의 첫 채움. 재생 시작(버퍼링 수 초)을 기다리지 않고 조회를
+    // 바로 시작해 소리가 나올 때쯤 차량에 정보가 이미 있게 한다. 주기 갱신은 재생 중일 때만.
+    private suspend fun refreshCurrentNowPlaying(initial: Boolean = false) {
+        if (!initial && !player.isPlaying) return
         val currentItem = player.currentMediaItem ?: return
         // NAS 음악은 편성 정보라는 개념이 없다. 이 가드가 없으면 NAS 재생 중에도
         // NAS mediaId를 방송국 ID로 착각해 라디오 메타데이터 API를 주기적으로 호출한다.
@@ -756,7 +758,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             (stationRepository.getAllStations().first().find { it.id == stationId }?.type
                 == com.arms.androidauto.core.model.StationType.STREAMING)
         if (isSameStationSongChange) delay(nowPlayingApplyDelayMs)
-        if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
+        if ((!initial && !player.isPlaying) || player.currentMediaItem?.mediaId != stationId) return
 
         val artwork = imageUrl?.let { loadArtwork(it, stationId) }
         // 커버가 있어야 하는데 못 받았다면 다음 주기부터 커버만 다시 시도한다.
@@ -776,7 +778,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 커버를 받는 동안(수 초) 채널이 바뀌었을 수 있다. 여기서 다시 확인하지 않으면 방금 전환된
         // 새 채널 항목을 옛 채널 항목으로 덮어써 "버튼을 눌렀는데 채널이 되돌아오는" 일이 생긴다.
         // 교체 기반도 조회 시작 때 잡아둔 currentItem이 아니라 지금의 현재 항목을 쓴다.
-        if (!player.isPlaying || player.currentMediaItem?.mediaId != stationId) return
+        if ((!initial && !player.isPlaying) || player.currentMediaItem?.mediaId != stationId) return
         val latest = player.currentMediaItem ?: return
         val station = stationRepository.getAllStations().first().find { it.id == stationId }
         val updatedMetadata = latest.mediaMetadata.buildUpon()
@@ -1196,7 +1198,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     }
 
     private fun scheduleImmediateRefresh() {
-        serviceScope.launch { delay(1_500L); refreshCurrentNowPlaying() }
+        serviceScope.launch { refreshCurrentNowPlaying(initial = true) }
     }
 
     // 인밴드 ICY 제목 반영: 곡당 교체 1회. 곡 커버(Deezer)를 2초 안에 먼저 찾고, 없으면 채널 아트를
