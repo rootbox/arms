@@ -1295,14 +1295,16 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 runCatching { contentResolver.openInputStream(android.net.Uri.parse(url))?.use { it.readBytes() } }.getOrNull()
             } else fetchArtworkBytes(url)
         } ?: return null
-        // 블루투스 BIP 전송은 느리고(수십 KB도 수 초), 세션 비트맵도 320px면 충분하다.
+        // Android Auto는 256×256을 넘는 이미지를 "car metadata update"에서 버린다(실차 로그:
+        // GH.MediaPlaybackMonitor: Image exceeded 256x256, omitting it). 블루투스 BIP 전송도 느리므로
+        // 256px 이하 JPEG로 맞춘다.
         val small = withContext(Dispatchers.Default) { downscaleArtwork(bytes) }
         val uri = createArtworkContentUri(small, stationId) ?: return null
         return Artwork(uri, small)
     }
 
     // 긴 변 maxPx 이하 JPEG로 축소. 디코딩 실패 시 원본을 그대로 쓴다.
-    private fun downscaleArtwork(bytes: ByteArray, maxPx: Int = 320): ByteArray = try {
+    private fun downscaleArtwork(bytes: ByteArray, maxPx: Int = 256): ByteArray = try {
         val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) bytes else {
