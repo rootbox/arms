@@ -105,6 +105,7 @@ class MainActivity : ComponentActivity() {
         stationRepository = StationRepository(this)
         mediaPlayer = SessionAudioPlayer(this)
         requestNotificationPermissionIfNeeded()
+        requestedOrientation = OrientationPolicy.requestedOrientation(resources.configuration.smallestScreenWidthDp)
 
         setContent {
             ARMSAndroidAutoTheme {
