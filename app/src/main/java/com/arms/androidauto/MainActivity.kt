@@ -607,6 +607,15 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
             // 라디오에는 일시정지 개념이 없다. 헤드유닛/블루투스 스피커의 키로 밖에서 멈춰지면(playWhenReady=false)
             // 화면을 "정지"로 맞춘다. 예전엔 "재생 중"으로 남아 같은 채널 재탭이 무시됐다(태블릿 BT 수신기 사례).
             else if (!playing && !player.playWhenReady()) playingStationId = null
+            // 밖에서 PAUSE 뒤 PLAY로 같은 채널이 다시 나오면 항목 전환 이벤트가 없다. 세션이 실제로
+            // 재생 중인 채널을 화면에 되돌린다(rc25 태블릿 검증: 소리는 나는데 화면은 빈 상태로 남았다).
+            else if (playing) {
+                val id = player.currentMediaId()
+                if (id != null && !MediaIdScheme.isNas(id) && playingStationId != id) {
+                    playingStationId = id
+                    selectedStationId = id
+                }
+            }
         }
         // 미디어키/헤드유닛/알림에서 정지된 경우(큐는 남아 항목 전환 이벤트가 없다) 화면도 내린다.
         player.onStoppedExternally = {
