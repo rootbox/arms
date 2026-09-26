@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
@@ -284,6 +285,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    // 태블릿(너비 720dp 이상)은 폰 레이아웃을 늘려 그리지 않고 2단으로: 왼쪽 목록, 오른쪽 상시 재생 패널.
+    // 이때 미니플레이어와 하단 슬라이드 오버레이는 쓰지 않는다(패널이 그 역할).
+    val isWide = LocalConfiguration.current.screenWidthDp >= 720
     val batteryUnrestricted by rememberIgnoringBatteryOptimizations(context)
     val updateChecker = remember { UpdateChecker(context) }
     var availableUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
@@ -748,6 +752,51 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         }
     }
 
+    // 재생 상세 패널. 폰에서는 미니플레이어를 누르면 아래에서 올라오는 오버레이, 태블릿에서는 오른쪽 상시 패널.
+    @Composable
+    fun NowPlayingPane(playback: ActivePlayback, onCollapse: (() -> Unit)?) {
+        NowPlayingDetailScreen(
+            playback = playback,
+            isPlaying = isActivePlaybackPlaying,
+            isLoadingMetadata = isLoadingMetadata,
+            positionMs = playbackPositionMs,
+            durationMs = playbackDurationMs,
+            shuffleEnabled = shuffleEnabled,
+            repeatMode = repeatMode,
+            onCollapse = onCollapse,
+            onFavoriteToggle = (playback as? ActivePlayback.Radio)?.let {
+                { toggleFavoriteForStation(it.station) }
+            },
+            onRefreshMetadata = if (playback is ActivePlayback.Radio) ::refreshNowPlayingMetadata else null,
+            onSeek = if (playback is ActivePlayback.Nas) {
+                { positionMs ->
+                    player.seekTo(positionMs)
+                    playbackPositionMs = positionMs
+                }
+            } else null,
+            onToggleShuffle = if (playback is ActivePlayback.Nas) {
+                {
+                    shuffleEnabled = !shuffleEnabled
+                    player.shuffleEnabled = shuffleEnabled
+                }
+            } else null,
+            onCycleRepeat = if (playback is ActivePlayback.Nas) {
+                {
+                    // 끄기 -> 전체 반복 -> 한 곡 반복 -> 끄기
+                    repeatMode = when (repeatMode) {
+                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                        else -> Player.REPEAT_MODE_OFF
+                    }
+                    player.repeatMode = repeatMode
+                }
+            } else null,
+            onPrevious = { handlePrevious() },
+            onPlayPauseToggle = { handlePlayPauseToggle() },
+            onNext = { handleNext() }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = Color.Transparent,
@@ -779,7 +828,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
             },
             bottomBar = {
                 Column {
-                    activePlayback?.let { playback ->
+                    if (!isWide) activePlayback?.let { playback ->
                         MiniPlayerBar(
                             playback = playback,
                             isPlaying = isActivePlaybackPlaying,
@@ -820,11 +869,16 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
             },
             snackbarHost = { SnackbarHost(snackbarHostState) }
         ) { paddingValues ->
-            Column(
+            Row(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(backgroundBrush)
                     .padding(paddingValues)
+            ) {
+            Column(
+                modifier = Modifier
+                    .weight(if (isWide) 0.45f else 1f)
+                    .fillMaxHeight()
                     .padding(horizontal = Spacing.screenHorizontal)
             ) {
                 if (!batteryUnrestricted) {
@@ -931,54 +985,41 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                     }
                 }
             }
+            if (isWide) {
+                Box(
+                    modifier = Modifier
+                        .weight(0.55f)
+                        .fillMaxHeight()
+                        .padding(end = Spacing.screenHorizontal, bottom = Spacing.screenHorizontal)
+                        .clip(RoundedCornerShape(24.dp))
+                ) {
+                    val playback = activePlayback
+                    if (playback != null) {
+                        NowPlayingPane(playback, onCollapse = null)
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxSize().background(SpotifyBlackElevated),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "채널이나 앨범을 선택하면 여기에 재생 정보가 표시됩니다",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = SpotifyTextMuted
+                            )
+                        }
+                    }
+                }
+            }
+            }
         }
 
         AnimatedVisibility(
-            visible = isNowPlayingExpanded && activePlayback != null,
+            visible = !isWide && isNowPlayingExpanded && activePlayback != null,
             enter = slideInVertically(initialOffsetY = { it }),
             exit = slideOutVertically(targetOffsetY = { it })
         ) {
             activePlayback?.let { playback ->
-                NowPlayingDetailScreen(
-                    playback = playback,
-                    isPlaying = isActivePlaybackPlaying,
-                    isLoadingMetadata = isLoadingMetadata,
-                    positionMs = playbackPositionMs,
-                    durationMs = playbackDurationMs,
-                    shuffleEnabled = shuffleEnabled,
-                    repeatMode = repeatMode,
-                    onCollapse = { isNowPlayingExpanded = false },
-                    onFavoriteToggle = (playback as? ActivePlayback.Radio)?.let {
-                        { toggleFavoriteForStation(it.station) }
-                    },
-                    onRefreshMetadata = if (playback is ActivePlayback.Radio) ::refreshNowPlayingMetadata else null,
-                    onSeek = if (playback is ActivePlayback.Nas) {
-                        { positionMs ->
-                            player.seekTo(positionMs)
-                            playbackPositionMs = positionMs
-                        }
-                    } else null,
-                    onToggleShuffle = if (playback is ActivePlayback.Nas) {
-                        {
-                            shuffleEnabled = !shuffleEnabled
-                            player.shuffleEnabled = shuffleEnabled
-                        }
-                    } else null,
-                    onCycleRepeat = if (playback is ActivePlayback.Nas) {
-                        {
-                            // 끄기 -> 전체 반복 -> 한 곡 반복 -> 끄기
-                            repeatMode = when (repeatMode) {
-                                Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                                Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                                else -> Player.REPEAT_MODE_OFF
-                            }
-                            player.repeatMode = repeatMode
-                        }
-                    } else null,
-                    onPrevious = { handlePrevious() },
-                    onPlayPauseToggle = { handlePlayPauseToggle() },
-                    onNext = { handleNext() }
-                )
+                NowPlayingPane(playback, onCollapse = { isNowPlayingExpanded = false })
             }
         }
 
@@ -1398,7 +1439,7 @@ private fun NowPlayingDetailScreen(
     durationMs: Long,
     shuffleEnabled: Boolean,
     repeatMode: Int,
-    onCollapse: () -> Unit,
+    onCollapse: (() -> Unit)?,
     onFavoriteToggle: (() -> Unit)?,
     onRefreshMetadata: (() -> Unit)?,
     onSeek: ((Long) -> Unit)?,
@@ -1429,14 +1470,14 @@ private fun NowPlayingDetailScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onCollapse) {
+if (onCollapse != null)             IconButton(onClick = onCollapse) {
                 Icon(
                     imageVector = Icons.Filled.KeyboardArrowDown,
                     contentDescription = "닫기",
                     tint = SpotifyTextPrimary,
                     modifier = Modifier.size(Sizes.playerIcon)
                 )
-            }
+            } else Spacer(Modifier.size(48.dp))
             if (onFavoriteToggle != null) {
                 IconButton(onClick = onFavoriteToggle) {
                     Icon(
