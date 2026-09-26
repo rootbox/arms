@@ -1472,10 +1472,17 @@ private fun NowPlayingDetailScreen(
     // 실시간 라디오는 진행바/셔플/반복이 의미가 없다 (끝이 없고 큐도 없다)
     val isTrackPlayback = playback is ActivePlayback.Nas
 
-    Column(
+    // 커버는 너비 기준(86%)이되 패널 높이의 절반을 넘지 않는다. 태블릿 가로 2단에서는 패널이
+    // 납작해져 너비 기준 커버가 제목·컨트롤을 화면 밖으로 밀어냈다(rc26 검증).
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundBrush)
+    ) {
+    val coverSize = minOf(maxWidth * 0.86f, maxHeight * 0.5f)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
             .padding(horizontal = Spacing.xl)
     ) {
         Spacer(modifier = Modifier.height(Spacing.lg))
@@ -1484,7 +1491,7 @@ private fun NowPlayingDetailScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-if (onCollapse != null)             IconButton(onClick = onCollapse) {
+            if (onCollapse != null) IconButton(onClick = onCollapse) {
                 Icon(
                     imageVector = Icons.Filled.KeyboardArrowDown,
                     contentDescription = "닫기",
@@ -1510,9 +1517,8 @@ if (onCollapse != null)             IconButton(onClick = onCollapse) {
 
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.86f)
+                .size(coverSize)
                 .align(Alignment.CenterHorizontally)
-                .aspectRatio(1f)
                 .clip(RoundedCornerShape(Radius.md))
                 .background(SpotifySurfaceElevated),
             contentAlignment = Alignment.Center
@@ -1677,6 +1683,7 @@ if (onCollapse != null)             IconButton(onClick = onCollapse) {
         }
 
         Spacer(modifier = Modifier.height(Spacing.huge))
+    }
     }
 }
 
