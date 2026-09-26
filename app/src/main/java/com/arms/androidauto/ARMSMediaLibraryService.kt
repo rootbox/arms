@@ -919,6 +919,18 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
         // 차량에서 셔플/반복 버튼을 눌렀을 때. 폰 화면의 동작과 같은 순서로 순환시킨다
         // (반복: 끄기 -> 전체 -> 한 곡).
+        // 헤드유닛/블루투스 스피커가 보내는 미디어 키를 기록한다. 태블릿의 블루투스 수신기가 재생 시작
+        // 직후 키를 보내 재생이 멈춘 사례가 있어, 어떤 키가 어디서 왔는지 보이게 한다.
+        override fun onMediaButtonEvent(
+            session: MediaSession,
+            controllerInfo: MediaSession.ControllerInfo,
+            intent: android.content.Intent
+        ): Boolean {
+            val key = @Suppress("DEPRECATION") intent.getParcelableExtra<android.view.KeyEvent>(android.content.Intent.EXTRA_KEY_EVENT)
+            android.util.Log.i("ARMS", "미디어 키: ${key?.let { android.view.KeyEvent.keyCodeToString(it.keyCode) + " action=" + it.action }} from ${controllerInfo.packageName}")
+            return super.onMediaButtonEvent(session, controllerInfo, intent)
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,

@@ -381,7 +381,8 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
     // 캐시된 frequencyOrUrl은 서명 토큰이 만료되었을 수 있으므로, 재생 직전에 항상 새 URL을 받아온다.
     fun playStation(station: Station) {
         selectedStationId = station.id
-        if (playingStationId == station.id) return
+        // 같은 채널이라도 실제로 재생 중이 아니면(밖에서 멈춰졌거나 시작 실패) 다시 시작한다.
+        if (playingStationId == station.id && player.isPlaying()) return
         player.stop()
         playingStationId = station.id
         nasPlaybackSource = null
@@ -602,6 +603,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         // 버퍼링·오디오 포커스 상실 등 플레이어가 먼저 멈추는 경우까지 상태를 맞춘다.
         player.onIsPlayingChanged = { playing ->
             if (nasPlaybackSource != null) isNasPaused = !playing
+            // 라디오에는 일시정지 개념이 없다. 헤드유닛/블루투스 스피커의 키로 밖에서 멈춰지면(playWhenReady=false)
+            // 화면을 "정지"로 맞춘다. 예전엔 "재생 중"으로 남아 같은 채널 재탭이 무시됐다(태블릿 BT 수신기 사례).
+            else if (!playing && !player.playWhenReady()) playingStationId = null
         }
         // 미디어키/헤드유닛/알림에서 정지된 경우(큐는 남아 항목 전환 이벤트가 없다) 화면도 내린다.
         player.onStoppedExternally = {

@@ -143,6 +143,7 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     fun currentArtist(): String? = controller?.currentMediaItem?.mediaMetadata?.artist?.toString()
     fun currentArtworkUri(): String? = controller?.currentMediaItem?.mediaMetadata?.artworkUri?.toString()
     fun isIdle(): Boolean = controller?.playbackState == Player.STATE_IDLE
+    fun playWhenReady(): Boolean = controller?.playWhenReady == true
 
     // 앱을 열자마자 "이미 재생 중인가"를 판단하려면 컨트롤러 연결(비동기)을 잠깐 기다려야 한다.
     suspend fun awaitConnected(timeoutMs: Long = 3_000L): Boolean =
