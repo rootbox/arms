@@ -418,7 +418,30 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // super.onTaskRemoved()를 의도적으로 호출하지 않는다.
     }
 
+    private var lastNotificationFingerprint: NotificationUpdatePolicy.Fingerprint? = null
+
+    // Media3가 알림을 다시 그리자고 할 때마다 부른다(상태·메타데이터·타임라인 변경). 보이는 값이
+    // 그대로면 건너뛴다 — 라이브 HLS는 타임라인이 6초마다 바뀌어 같은 알림이 시간당 600회 게시됐다.
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        val p = session.player
+        val md = p.mediaMetadata
+        val next = NotificationUpdatePolicy.Fingerprint(
+            playWhenReady = p.playWhenReady,
+            playbackState = p.playbackState,
+            isPlaying = p.isPlaying,
+            mediaId = p.currentMediaItem?.mediaId,
+            title = md.title?.toString(),
+            artist = md.artist?.toString(),
+            artworkKey = md.artworkUri?.toString() ?: md.artworkData?.contentHashCode()?.toString(),
+            startInForegroundRequired = startInForegroundRequired,
+        )
+        if (!NotificationUpdatePolicy.shouldPost(lastNotificationFingerprint, next)) return
+        lastNotificationFingerprint = next
+        super.onUpdateNotification(session, startInForegroundRequired)
+    }
+
     override fun onDestroy() {
+        lastNotificationFingerprint = null
         nowPlayingRefreshJob?.cancel()
         carConnectionObserver?.let { carConnection?.type?.removeObserver(it) }
         carConnectionObserver = null

@@ -27,8 +27,8 @@ android {
         applicationId = "com.arms.androidauto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.7.0-rc28"
+        versionCode = 21
+        versionName = "0.7.1-rc1"
     }
 
     signingConfigs {
@@ -63,6 +63,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -80,6 +81,7 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:playback"))
     implementation(project(":core:data"))
+    implementation(project(":core:network"))
 
     implementation(platform("androidx.compose:compose-bom:2024.09.03"))
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.09.03"))
