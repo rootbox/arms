@@ -156,6 +156,7 @@ fun NasPlaylistDetailScreen(
     tracks: List<NasPlaylistTrack>,
     isPlayingThisPlaylist: Boolean,
     playingTrackTitle: String?,
+    playingTrackIndex: Int? = null,
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onPlayFrom: (Int) -> Unit,
@@ -253,7 +254,8 @@ fun NasPlaylistDetailScreen(
                     trackNumber = index + 1,
                     title = track.title,
                     subtitle = track.artist ?: track.albumArtist,
-                    isPlaying = isPlayingThisPlaylist && playingTrackTitle == track.title,
+                    isPlaying = isPlayingThisPlaylist &&
+                        (if (playingTrackIndex != null) playingTrackIndex == index else playingTrackTitle == track.title),
                     trailingIcon = Icons.Filled.Close,
                     trailingDescription = "플레이리스트에서 빼기",
                     onClick = { onPlayFrom(index) },

@@ -57,6 +57,7 @@ fun NasAlbumDetailScreen(
     isLoading: Boolean,
     isPlayingThisAlbum: Boolean,
     playingTrackTitle: String?,
+    playingTrackIndex: Int? = null,
     onBack: () -> Unit,
     onPlayAll: () -> Unit,
     onPlayFrom: (Int) -> Unit,
@@ -175,7 +176,8 @@ fun NasAlbumDetailScreen(
                     title = song.title,
                     subtitle = song.artist ?: album.albumArtist,
                     // 이 앨범을 재생 중이면서 제목이 같은 곡을 "지금 재생 중"으로 본다.
-                    isPlaying = isPlayingThisAlbum && playingTrackTitle == song.title,
+                    isPlaying = isPlayingThisAlbum &&
+                        (if (playingTrackIndex != null) playingTrackIndex == index else playingTrackTitle == song.title),
                     trailingIcon = Icons.Filled.Add,
                     trailingDescription = "플레이리스트에 담기",
                     onClick = { onPlayFrom(index) },

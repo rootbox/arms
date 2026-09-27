@@ -357,6 +357,8 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
     var showRemotePairing by remember { mutableStateOf(false) }
     var nasConfigured by remember { mutableStateOf(nasMusicRepository.hasCredentials()) }
     var nasCurrentTrackTitle by remember { mutableStateOf<String?>(null) }
+    // 목록 하이라이트는 제목이 아니라 큐 인덱스로 맞춘다(같은 제목의 곡이 두 행 모두 켜졌던 rc6 검증).
+    var nasCurrentTrackIndex by remember { mutableStateOf<Int?>(null) }
     var nasCurrentTrackArtwork by remember { mutableStateOf<String?>(null) }
     var isNasPaused by remember { mutableStateOf(false) }
     var nasSearchQuery by remember { mutableStateOf("") }
@@ -562,6 +564,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                     else -> null
                 }
                 nasCurrentTrackTitle = player.currentTitle()
+                nasCurrentTrackIndex = player.currentTrackIndex()
                 nasCurrentTrackArtwork = player.currentArtworkUri()
                 isNasPaused = !player.isPlaying()
             } else {
@@ -614,6 +617,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         }
         player.onTrackChanged = { title, artwork ->
             nasCurrentTrackTitle = title
+            nasCurrentTrackIndex = player.currentTrackIndex()
             nasCurrentTrackArtwork = artwork
             // 트랙이 넘어갈 때마다 이어듣기 지점을 갱신한다 (전체화면을 안 열어도 인덱스는 정확히 남는다)
             if (nasPlaybackSource != null) {
@@ -989,6 +993,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                             isPlayingThisAlbum =
                                 (nasPlaybackSource as? NasPlaybackSource.Album)?.album?.key == screen.album.key,
                             playingTrackTitle = nasCurrentTrackTitle,
+                            playingTrackIndex = nasCurrentTrackIndex,
                             onBack = { nasScreen = NasScreen.Library },
                             onPlayAll = { playNasAlbum(screen.album) },
                             onPlayFrom = { index -> playNasAlbum(screen.album, startIndex = index) },
@@ -1003,6 +1008,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                                 isPlayingThisPlaylist =
                                     (nasPlaybackSource as? NasPlaybackSource.Playlist)?.id == screen.playlistId,
                                 playingTrackTitle = nasCurrentTrackTitle,
+                            playingTrackIndex = nasCurrentTrackIndex,
                                 onBack = { nasScreen = NasScreen.Library },
                                 onPlayAll = { playlist?.let { playNasPlaylist(it) } },
                                 onPlayFrom = { index -> playlist?.let { playNasPlaylist(it, index) } },
