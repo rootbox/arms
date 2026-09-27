@@ -39,6 +39,26 @@ class RemoteSettingsStore(context: Context) {
         prefs.edit().remove(KEY_PAIRING).apply()
     }
 
+    // 호스트의 브로커 설정(한 번만 입력). 페어링을 해제해도 남겨 두어 QR을 다시 만들 때 재입력하지 않는다.
+    data class BrokerSettings(val url: String, val username: String, val password: String)
+
+    fun getBrokerSettings(): BrokerSettings? {
+        val url = prefs.getString(KEY_BROKER_URL, null)?.takeIf { it.isNotBlank() } ?: return null
+        return BrokerSettings(
+            url = url,
+            username = prefs.getString(KEY_BROKER_USER, "") ?: "",
+            password = prefs.getString(KEY_BROKER_PASS, "") ?: "",
+        )
+    }
+
+    fun saveBrokerSettings(settings: BrokerSettings) {
+        prefs.edit()
+            .putString(KEY_BROKER_URL, settings.url.trim())
+            .putString(KEY_BROKER_USER, settings.username.trim())
+            .putString(KEY_BROKER_PASS, settings.password)
+            .apply()
+    }
+
     // 게스트/호스트가 브로커에 접속할 때 쓰는 클라이언트 ID(기기마다 1회 생성, 비밀 아님).
     fun clientId(): String {
         val existing = prefs.getString(KEY_CLIENT_ID, null)
@@ -52,5 +72,8 @@ class RemoteSettingsStore(context: Context) {
         const val KEY_ROLE = "role"
         const val KEY_PAIRING = "pairing"
         const val KEY_CLIENT_ID = "client_id"
+        const val KEY_BROKER_URL = "broker_url"
+        const val KEY_BROKER_USER = "broker_user"
+        const val KEY_BROKER_PASS = "broker_pass"
     }
 }

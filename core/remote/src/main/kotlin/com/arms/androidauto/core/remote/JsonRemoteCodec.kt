@@ -15,11 +15,12 @@ object JsonRemoteCodec : RemoteCodec {
     private const val T_ACK = "ack"
 
     private val envelopeKeys = setOf("v", "t", "seq", "ts")
-    private val cmdKeys = envelopeKeys + setOf("cmd", "mediaId", "percent")
+    private val cmdKeys = envelopeKeys + setOf("cmd", "mediaId", "percent", "guestName")
     private val stateKeys = envelopeKeys + setOf(
         "mediaId", "title", "artist", "isPlaying", "playbackState", "artworkRef",
-        "bluetooth", "batteryPercent", "updatedAtMs", "items",
+        "bluetooth", "batteryPercent", "updatedAtMs", "items", "volumePercent", "guests", "revoked",
     )
+    private val guestKeys = setOf("name", "lastSeenMs")
     private val bluetoothKeys = setOf("connected", "deviceName", "changedAtMs")
     private val itemKeys = setOf("mediaId", "name", "subtitle")
     private val ackKeys = envelopeKeys + setOf("ackSeq", "ok", "message")
@@ -33,6 +34,8 @@ object JsonRemoteCodec : RemoteCodec {
     private const val C_BT_RECONNECT = "bt_reconnect"
     private const val C_SELECT = "select"
     private const val C_VOLUME = "volume"
+    private const val C_HELLO = "hello"
+    private const val C_BYE = "bye"
 
     override fun encode(message: RemoteMessage): String {
         val json = JSONObject()
@@ -52,6 +55,8 @@ object JsonRemoteCodec : RemoteCodec {
                     RemoteCommand.BtReconnect -> json.put("cmd", C_BT_RECONNECT)
                     is RemoteCommand.Select -> json.put("cmd", C_SELECT).put("mediaId", c.mediaId)
                     is RemoteCommand.Volume -> json.put("cmd", C_VOLUME).put("percent", c.percent)
+                    is RemoteCommand.Hello -> json.put("cmd", C_HELLO).put("guestName", c.guestName)
+                    RemoteCommand.Bye -> json.put("cmd", C_BYE)
                 }
             }
             is RemoteMessage.State -> {
@@ -75,6 +80,14 @@ object JsonRemoteCodec : RemoteCodec {
                 }
                 json.put("batteryPercent", s.batteryPercent)
                 json.put("updatedAtMs", s.updatedAtMs)
+                json.put("volumePercent", s.volumePercent)
+                if (s.guests.isNotEmpty()) json.put(
+                    "guests",
+                    JSONArray().also { arr ->
+                        s.guests.forEach { g -> arr.put(JSONObject().put("name", g.name).put("lastSeenMs", g.lastSeenMs)) }
+                    },
+                )
+                if (s.revoked) json.put("revoked", true)
                 json.put(
                     "items",
                     JSONArray().also { arr ->
@@ -137,23 +150,31 @@ object JsonRemoteCodec : RemoteCodec {
         val cmd = json.requireString("cmd") ?: return null
         val hasMediaId = json.has("mediaId")
         val hasPercent = json.has("percent")
+        val hasGuestName = json.has("guestName")
         return when (cmd) {
+            C_HELLO -> {
+                if (hasMediaId || hasPercent) return null
+                val name = json.requireString("guestName") ?: return null
+                if (name.isBlank() || name.length > 40) return null
+                RemoteCommand.Hello(name)
+            }
             C_SELECT -> {
-                if (hasPercent) return null
+                if (hasPercent || hasGuestName) return null
                 val mediaId = json.requireString("mediaId") ?: return null
                 if (mediaId.isBlank()) return null
                 RemoteCommand.Select(mediaId)
             }
             C_VOLUME -> {
-                if (hasMediaId) return null
+                if (hasMediaId || hasGuestName) return null
                 val percent = json.optIntStrict("percent") ?: return null
                 if (percent !in 0..100) return null
                 RemoteCommand.Volume(percent)
             }
             else -> {
                 // 단순 명령은 인자를 가질 수 없다.
-                if (hasMediaId || hasPercent) return null
+                if (hasMediaId || hasPercent || hasGuestName) return null
                 when (cmd) {
+                    C_BYE -> RemoteCommand.Bye
                     C_PLAY -> RemoteCommand.Play
                     C_PAUSE -> RemoteCommand.Pause
                     C_STOP -> RemoteCommand.Stop
@@ -202,6 +223,23 @@ object JsonRemoteCodec : RemoteCodec {
         } else {
             emptyList()
         }
+        val volumePercent = json.optionalInt("volumePercent") ?: return null
+        if (volumePercent.value != null && volumePercent.value !in 0..100) return null
+        val guests = if (json.has("guests")) {
+            val arr = json.get("guests") as? JSONArray ?: return null
+            val list = ArrayList<RemoteGuest>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.get(i) as? JSONObject ?: return null
+                if (!obj.keysWithin(guestKeys)) return null
+                val name = obj.requireString("name") ?: return null
+                val lastSeen = obj.requireLong("lastSeenMs") ?: return null
+                list.add(RemoteGuest(name = name, lastSeenMs = lastSeen))
+            }
+            list
+        } else {
+            emptyList()
+        }
+        val revoked = if (json.has("revoked")) (json.requireBoolean("revoked") ?: return null) else false
         return HostState(
             mediaId = mediaId.value,
             title = title.value,
@@ -213,6 +251,9 @@ object JsonRemoteCodec : RemoteCodec {
             batteryPercent = batteryPercent.value,
             updatedAtMs = updatedAtMs,
             items = items,
+            volumePercent = volumePercent.value,
+            guests = guests,
+            revoked = revoked,
         )
     }
 

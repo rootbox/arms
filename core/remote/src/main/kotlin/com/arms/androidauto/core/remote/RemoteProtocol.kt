@@ -21,7 +21,15 @@ sealed class RemoteCommand {
     // 호스트가 알고 있는 mediaId(라디오 채널 id 또는 NAS 앨범/플레이리스트 mediaId)만 받는다.
     data class Select(val mediaId: String) : RemoteCommand()
     data class Volume(val percent: Int) : RemoteCommand()
+    // 게스트가 리모컨 화면을 열 때(그리고 60초마다) 보내는 인사. 호스트는 이걸로 "누가 붙어 있는지"를 안다.
+    // guestName은 기기 모델명 정도(예: "Galaxy S25"), 그 이상은 담지 않는다.
+    data class Hello(val guestName: String) : RemoteCommand()
+    // 리모컨 화면을 닫을 때. 못 보내도 호스트는 lastSeen 만료(3분)로 정리한다.
+    object Bye : RemoteCommand()
 }
+
+// 호스트에 붙어 있는 게스트(게스트 이름 + 마지막 인사 시각).
+data class RemoteGuest(val name: String, val lastSeenMs: Long)
 
 data class BluetoothStatus(
     val connected: Boolean,
@@ -48,6 +56,12 @@ data class HostState(
     val updatedAtMs: Long,
     // 게스트가 고를 수 있는 채널/앨범 목록. 라디오 채널은 항상, NAS는 이름만.
     val items: List<RemoteItem> = emptyList(),
+    // 호스트 미디어 볼륨(0..100). 게스트 슬라이더의 현재값.
+    val volumePercent: Int? = null,
+    // 현재 붙어 있는 게스트들(호스트 상단바·QR 화면 자동 닫힘에 쓴다).
+    val guests: List<RemoteGuest> = emptyList(),
+    // 호스트가 "연결 종료"를 눌렀다: 게스트는 이 상태를 받으면 페어링을 지우고 안내한다.
+    val revoked: Boolean = false,
 )
 
 sealed class RemoteMessage {

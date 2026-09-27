@@ -93,6 +93,8 @@ private fun describe(command: RemoteCommand): String = when (command) {
     RemoteCommand.Next -> "next"
     RemoteCommand.Previous -> "prev"
     RemoteCommand.Refresh -> "refresh"
+    RemoteCommand.Bye -> "bye"
+    is RemoteCommand.Hello -> "hello:${command.guestName}"
     RemoteCommand.BtReconnect -> "bt_reconnect"
     is RemoteCommand.Select -> "select:${command.mediaId}"
     is RemoteCommand.Volume -> "volume:${command.percent}"
@@ -156,7 +158,7 @@ private fun runHost(opts: Map<String, String>) {
                     RemoteCommand.Pause, RemoteCommand.Stop -> playing = false
                     RemoteCommand.Next -> index = (index + 1) % items.size
                     RemoteCommand.Previous -> index = (index + items.size - 1) % items.size
-                    RemoteCommand.Refresh -> Unit
+                    RemoteCommand.Refresh, RemoteCommand.Bye, is RemoteCommand.Hello -> Unit
                     RemoteCommand.BtReconnect -> btConnected = true
                     is RemoteCommand.Select -> {
                         val i = items.indexOfFirst { it.mediaId == c.mediaId }
