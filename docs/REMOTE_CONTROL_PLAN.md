@@ -80,3 +80,8 @@
 - NAS 컨테이너·서브도메인·인증서 작업은 사용자 손이 필요(리버스 프록시·LE 바인딩은 DSM UI). 절차는 문서화하되 자격증명은 문서·채팅에 남기지 않는다.
 - BT 재연결이 API로 불가하면 "재연결" 요구는 "연결 유지 + 정확한 상태 표시"로 축소된다 — Phase 0에서 결정.
 - 태블릿 상시 연결이 Samsung 절전에 걸리면 호스트가 사라진 것처럼 보인다 → retained 상태에 `updatedAt`을 넣어 게스트가 "오래된 상태"를 구분.
+
+## 8. 진행 상태
+- **2026-09-27 · 0.8.0-rc1 (v22-rc1, feature/remote)**: Phase 1~3 코드 완료. `core/remote`(Pairing/JsonRemoteCodec/AesGcmSealedBox/ReplayGuard/MqttRemoteTransport(HiveMQ)/RemoteChannel/RemoteCli, 테스트 50), 호스트(`remote/host/`: RemoteHostService·BluetoothOutputMonitor·BluetoothReconnector·HostPairingScreen·HostStateBuilder·StatePublishPolicy, 테스트 23), 게스트(`remote/guest/`: RemoteGuestClient·GuestStatusPolicy·RemoteControlScreen·GuestPairingScreen, 테스트 13), 설정 메뉴·역할 다이얼로그·리모컨 탭·부팅 리시버 배선. 로컬 Mosquitto(ws://127.0.0.1:9001)에서 CLI 호스트↔게스트 왕복 확인(retained 상태 → next → ack → 갱신 상태).
+- 교훈: HiveMQ의 WebSocket은 `io.netty:netty-codec-http`가 선택 의존성이라 빠지면 접속 시 `NoClassDefFoundError`. 단위 테스트(인메모리 전송)로는 안 잡히고 실제 브로커 왕복에서만 드러난다 → CLI 스모크를 릴리즈 게이트에 포함.
+- Phase 0 잔여: ① NAS Mosquitto(docs/remote/nas-mosquitto) 사용자 작업 대기 ② 태블릿 BT 재연결 실측(`BluetoothReconnector` 로그로 판정) ③ 태블릿 24h 상시 연결.

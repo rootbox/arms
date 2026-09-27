@@ -25,7 +25,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | v0.7.0-rc28 (versionCode 20) — 정식 v20은 실차(MINI 블루투스·AA 회귀) 검증 후 |
+| 버전 | v0.7.0-rc28 (versionCode 20, `release/0.7.0`) — 정식 v20은 실차 검증 후. main: 0.7.1-rc1(21, 자원 개선, docs/USAGE_LOG_PLAN.md). feature/remote: 0.8.0-rc1(22, 원격 제어, docs/REMOTE_CONTROL_PLAN.md) |
 | 코드 규모 | 안드로이드 소스 약 6,600줄 + 데스크톱 모듈, 안드로이드 단위 테스트 61건(+데스크톱 5건) |
 | 최소/타깃 SDK | 26 / 35 |
 | 릴리즈 APK | 약 13.6MB (서명된 release 빌드) |
