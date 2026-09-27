@@ -1,0 +1,2 @@
+# 모든 인증 계정: Simple Radio 토픽만.
+pattern readwrite sr/#

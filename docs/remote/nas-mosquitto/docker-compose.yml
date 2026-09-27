@@ -1,0 +1,14 @@
+# Synology Container Manager용. 프로젝트 이름: sr-mqtt
+# 브로커는 LAN 안에서만 열고(127.0.0.1 바인딩), 외부는 DSM 리버스 프록시(WSS, LE 인증서)를 통해서만 들어온다.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: sr-mosquitto
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9001:9001"   # WebSocket (리버스 프록시가 여기로)
+      - "127.0.0.1:1883:1883"   # LAN 개발/점검용 TCP (외부 노출 금지)
+    volumes:
+      - ./config:/mosquitto/config:ro
+      - ./data:/mosquitto/data
+      - ./log:/mosquitto/log
