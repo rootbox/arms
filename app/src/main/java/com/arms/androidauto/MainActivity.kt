@@ -866,7 +866,8 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
             },
             bottomBar = {
                 Column {
-                    if (!isWide) activePlayback?.let { playback ->
+                    // 리모컨 탭에서는 폰 자체 재생 미니플레이어를 숨긴다(태블릿 제어 버튼과 혼동).
+                    if (!isWide && selectedTab != 2) activePlayback?.let { playback ->
                         MiniPlayerBar(
                             playback = playback,
                             isPlaying = isActivePlaybackPlaying,

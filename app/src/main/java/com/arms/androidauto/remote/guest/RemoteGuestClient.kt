@@ -89,11 +89,16 @@ class RemoteGuestClient(
         channel = ch
 
         // 전송 연결 상태를 화면용 StateFlow로 옮기고, 연결될 때마다 최신 상태를 요청한다.
+        // 첫 연결의 Refresh는 start()가 구독까지 마친 뒤에 보낸다(아래). 연결 직후 CONNECTED 전이에서
+        // 보내면 ack 토픽 구독이 끝나기 전이라 ack를 놓쳐 "응답 없음"이 떴다(S22 rc1 검증). 재접속은 전이로 잡는다.
+        var started = false
         session.launch {
             var previous = ConnectionState.DISCONNECTED
             ch.connectionState.collect { state ->
                 _connectionState.value = state
-                if (state == ConnectionState.CONNECTED && previous != ConnectionState.CONNECTED) {
+                android.util.Log.i("ARMS", "리모컨 연결 상태: $state")
+                if (started && state == ConnectionState.CONNECTED && previous != ConnectionState.CONNECTED) {
+                    delay(500L)
                     send(RemoteCommand.Refresh)
                 }
                 if (state == ConnectionState.DISCONNECTED && previous != ConnectionState.DISCONNECTED) {
@@ -111,7 +116,15 @@ class RemoteGuestClient(
         }
         session.launch(Dispatchers.IO) {
             runCatching { ch.start(asHost = false) }
-                .onFailure { _error.value = "브로커에 연결할 수 없습니다" }
+                .onSuccess {
+                    started = true
+                    android.util.Log.i("ARMS", "리모컨 구독 완료, 상태 요청")
+                    send(RemoteCommand.Refresh)
+                }
+                .onFailure {
+                    android.util.Log.w("ARMS", "리모컨 브로커 연결 실패: ${it.javaClass.simpleName}")
+                    _error.value = "브로커에 연결할 수 없습니다"
+                }
         }
     }
 
@@ -138,12 +151,16 @@ class RemoteGuestClient(
             return
         }
         val session = sessionScope ?: return
-        if (_pendingSeq.value != null) return
+        // 새로고침은 "보내고 잊는" 요청이다. ack를 기다려 버튼을 잠그면 화면을 열 때마다 5초씩 굳는다.
+        val awaitAck = command !is RemoteCommand.Refresh
+        if (awaitAck && _pendingSeq.value != null) return
         session.launch(Dispatchers.IO) {
             val seq = runCatching { ch.sendCommand(command) }.getOrElse {
+                android.util.Log.w("ARMS", "리모컨 명령 전송 실패: ${it.javaClass.simpleName}")
                 _error.value = "명령을 보내지 못했습니다"
                 return@launch
             }
+            if (!awaitAck) return@launch
             pendingCommand = command
             _pendingSeq.value = seq
             ackTimeoutJob?.cancel()
@@ -160,6 +177,7 @@ class RemoteGuestClient(
 
     private fun onAck(ack: RemoteMessage.Ack) {
         _lastAck.value = ack
+        android.util.Log.i("ARMS", "리모컨 ack seq=${ack.ackSeq} ok=${ack.ok}")
         if (ack.ackSeq == _pendingSeq.value) {
             ackTimeoutJob?.cancel()
             ackTimeoutJob = null

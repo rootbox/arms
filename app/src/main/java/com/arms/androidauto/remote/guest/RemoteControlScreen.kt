@@ -344,7 +344,8 @@ private fun NowPlayingHeader(state: HostState?, status: GuestStatus) {
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.72f)
+                .fillMaxWidth(0.46f)
+                .widthIn(max = 200.dp)
                 .widthIn(max = 320.dp)
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(Radius.md))
