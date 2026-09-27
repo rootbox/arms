@@ -142,6 +142,7 @@ class RemoteHostService : Service() {
             val tr = transport
             channel = null
             transport = null
+            channelReady = false
             // 브로커 연결 정리는 서비스 스코프 밖에서(취소돼도 끝까지) 짧게.
             CoroutineScope(Dispatchers.IO).launch {
                 withTimeoutOrNull(3_000L) {
@@ -223,8 +224,12 @@ class RemoteHostService : Service() {
         transport = tr
         channel = ch
         scope.launch {
+            tr.connectionState.collect { Log.i("ARMS", "리모컨 호스트: 브로커 $it") }
+        }
+        scope.launch {
             try {
                 ch.start(asHost = true)
+                channelReady = true
                 Log.i("ARMS", "리모컨 호스트: 채널 시작")
                 requestPublish(forced = true)
             } catch (t: Throwable) {
@@ -317,8 +322,13 @@ class RemoteHostService : Service() {
         }
     }
 
+    // 채널이 구독까지 마치기 전(플레이어·BT·배터리 이벤트가 먼저 올 수 있다)에는 publish하지 않는다.
+    // 시작 완료 시 forced publish가 한 번 나가므로 놓치는 상태는 없다. (S22 rc2: 시작 24ms 뒤 실패 로그 2건)
+    @Volatile private var channelReady = false
+
     private suspend fun publishNow() {
         val ch = channel ?: return
+        if (!channelReady) return
         val state = buildState()
         try {
             ch.publishState(state)
