@@ -1,0 +1,183 @@
+package com.arms.androidauto.remote.guest
+
+import android.content.Context
+import com.arms.androidauto.core.remote.ConnectionState
+import com.arms.androidauto.core.remote.HostState
+import com.arms.androidauto.core.remote.MqttRemoteTransport
+import com.arms.androidauto.core.remote.RemoteChannel
+import com.arms.androidauto.core.remote.RemoteCommand
+import com.arms.androidauto.core.remote.RemoteMessage
+import com.arms.androidauto.remote.RemoteSettingsStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+// 게스트(폰) 쪽 원격 제어 클라이언트. 리모컨 화면이 보이는 동안만 살아 있다(백그라운드 상시 연결 없음).
+// start()/stop()은 화면의 ON_RESUME/ON_PAUSE에 맞춰 부른다. 화면은 여기의 StateFlow만 읽는다.
+class RemoteGuestClient(
+    context: Context,
+    private val store: RemoteSettingsStore,
+    private val scope: CoroutineScope,
+) {
+    @Suppress("unused")
+    private val appContext: Context = context.applicationContext
+
+    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+
+    private val _hostState = MutableStateFlow<HostState?>(null)
+    val hostState: StateFlow<HostState?> = _hostState.asStateFlow()
+
+    private val _lastAck = MutableStateFlow<RemoteMessage.Ack?>(null)
+    val lastAck: StateFlow<RemoteMessage.Ack?> = _lastAck.asStateFlow()
+
+    // 마지막으로 ack가 온 명령과 그 ack. 화면이 "재연결" 같은 특정 명령의 결과 문구를 보여줄 때 쓴다.
+    data class AckResult(val command: RemoteCommand, val ack: RemoteMessage.Ack)
+    private val _lastAckResult = MutableStateFlow<AckResult?>(null)
+    val lastAckResult: StateFlow<AckResult?> = _lastAckResult.asStateFlow()
+
+    // 보냈지만 아직 ack를 못 받은 명령의 seq. null이면 보낼 수 있다.
+    private val _pendingSeq = MutableStateFlow<Long?>(null)
+    val pendingSeq: StateFlow<Long?> = _pendingSeq.asStateFlow()
+
+    // 사용자에게 보여줄 한 줄 오류("태블릿 응답 없음", 호스트가 돌려준 실패 메시지). clearError()로 지운다.
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    // 저장된 페어링이 있는지. start() 때마다 다시 읽는다(페어링 화면에서 돌아온 직후 반영).
+    private val _paired = MutableStateFlow(false)
+    val paired: StateFlow<Boolean> = _paired.asStateFlow()
+
+    private var channel: RemoteChannel? = null
+    private var sessionJob: Job? = null
+    private var sessionScope: CoroutineScope? = null
+    private var ackTimeoutJob: Job? = null
+    private var pendingCommand: RemoteCommand? = null
+
+    // stop()은 화면이 사라지는 순간(스코프가 이미 취소됐을 수 있음)에도 브로커 연결을 끊어야 하므로
+    // 화면 스코프와 독립된 곳에서 끝낸다.
+    private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    fun start() {
+        if (channel != null) return
+        val pairing = store.getPairing()
+        _paired.value = pairing != null
+        if (pairing == null) {
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
+
+        val job = SupervisorJob(scope.coroutineContext[Job])
+        val session = CoroutineScope(scope.coroutineContext + job)
+        sessionJob = job
+        sessionScope = session
+
+        val transport = MqttRemoteTransport(
+            brokerUrl = pairing.brokerUrl,
+            username = pairing.username,
+            password = pairing.password,
+            clientId = store.clientId() + "-guest",
+        )
+        val ch = RemoteChannel(pairing, transport, session)
+        channel = ch
+
+        // 전송 연결 상태를 화면용 StateFlow로 옮기고, 연결될 때마다 최신 상태를 요청한다.
+        session.launch {
+            var previous = ConnectionState.DISCONNECTED
+            ch.connectionState.collect { state ->
+                _connectionState.value = state
+                if (state == ConnectionState.CONNECTED && previous != ConnectionState.CONNECTED) {
+                    send(RemoteCommand.Refresh)
+                }
+                if (state == ConnectionState.DISCONNECTED && previous != ConnectionState.DISCONNECTED) {
+                    // 끊기면 기다리던 ack는 오지 않는다.
+                    failPending(GuestStatusPolicy.NO_ACK_MESSAGE)
+                }
+                previous = state
+            }
+        }
+        session.launch {
+            ch.states.collect { _hostState.value = it }
+        }
+        session.launch {
+            ch.acks.collect { onAck(it) }
+        }
+        session.launch(Dispatchers.IO) {
+            runCatching { ch.start(asHost = false) }
+                .onFailure { _error.value = "브로커에 연결할 수 없습니다" }
+        }
+    }
+
+    fun stop() {
+        val ch = channel ?: return
+        channel = null
+        ackTimeoutJob?.cancel()
+        ackTimeoutJob = null
+        sessionJob?.cancel()
+        sessionJob = null
+        sessionScope = null
+        _pendingSeq.value = null
+        pendingCommand = null
+        _connectionState.value = ConnectionState.DISCONNECTED
+        teardownScope.launch {
+            withTimeoutOrNull(STOP_TIMEOUT_MS) { runCatching { ch.stop() } }
+        }
+    }
+
+    // 명령 하나를 보내고 ack를 기다린다. 5초 안에 ack가 없으면 "태블릿 응답 없음".
+    fun send(command: RemoteCommand) {
+        val ch = channel ?: run {
+            _error.value = "연결되지 않았습니다"
+            return
+        }
+        val session = sessionScope ?: return
+        if (_pendingSeq.value != null) return
+        session.launch(Dispatchers.IO) {
+            val seq = runCatching { ch.sendCommand(command) }.getOrElse {
+                _error.value = "명령을 보내지 못했습니다"
+                return@launch
+            }
+            pendingCommand = command
+            _pendingSeq.value = seq
+            ackTimeoutJob?.cancel()
+            ackTimeoutJob = session.launch {
+                delay(GuestStatusPolicy.ACK_TIMEOUT_MS)
+                if (_pendingSeq.value == seq) failPending(GuestStatusPolicy.NO_ACK_MESSAGE)
+            }
+        }
+    }
+
+    fun clearError() {
+        _error.value = null
+    }
+
+    private fun onAck(ack: RemoteMessage.Ack) {
+        _lastAck.value = ack
+        if (ack.ackSeq == _pendingSeq.value) {
+            ackTimeoutJob?.cancel()
+            ackTimeoutJob = null
+            pendingCommand?.let { _lastAckResult.value = AckResult(it, ack) }
+            pendingCommand = null
+            _pendingSeq.value = null
+        }
+        if (!ack.ok) _error.value = ack.message ?: "태블릿이 명령을 거부했습니다"
+    }
+
+    private fun failPending(message: String) {
+        if (_pendingSeq.value == null) return
+        _pendingSeq.value = null
+        pendingCommand = null
+        _error.value = message
+    }
+
+    private companion object {
+        const val STOP_TIMEOUT_MS = 3_000L
+    }
+}

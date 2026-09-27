@@ -34,6 +34,12 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import com.arms.androidauto.remote.RemoteRole
+import com.arms.androidauto.remote.RemoteSettingsStore
+import com.arms.androidauto.remote.guest.GuestPairingScreen
+import com.arms.androidauto.remote.guest.RemoteControlScreen
+import com.arms.androidauto.remote.host.HostPairingScreen
+import com.arms.androidauto.remote.host.RemoteHostService
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -336,6 +342,12 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
     var nasAlbums by remember { mutableStateOf<List<NasAlbum>>(emptyList()) }
     var nasPlaybackSource by remember { mutableStateOf<NasPlaybackSource?>(null) }
     var showNasSettings by remember { mutableStateOf(false) }
+    // 원격 제어: 역할(호스트=태블릿, 게스트=폰)과 페어링. 게스트면 하단에 "리모컨" 탭이 생긴다.
+    val remoteSettingsStore = remember { RemoteSettingsStore(context) }
+    var remoteRole by remember { mutableStateOf(remoteSettingsStore.getRole()) }
+    var showSettingsMenu by remember { mutableStateOf(false) }
+    var showRemoteSettings by remember { mutableStateOf(false) }
+    var showRemotePairing by remember { mutableStateOf(false) }
     var nasConfigured by remember { mutableStateOf(nasMusicRepository.hasCredentials()) }
     var nasCurrentTrackTitle by remember { mutableStateOf<String?>(null) }
     var nasCurrentTrackArtwork by remember { mutableStateOf<String?>(null) }
@@ -820,18 +832,30 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                 TopAppBar(
                     title = {
                         Text(
-                            text = if (selectedTab == 0) "라디오" else "내 음악",
+                            text = when (selectedTab) { 0 -> "라디오"; 2 -> "리모컨"; else -> "내 음악" },
                             style = MaterialTheme.typography.headlineLarge,
                             color = SpotifyTextPrimary
                         )
                     },
                     actions = {
-                        IconButton(onClick = { showNasSettings = true }) {
-                            Icon(
-                                Icons.Filled.Settings,
-                                contentDescription = "NAS 음악 설정",
-                                tint = SpotifyTextMuted
-                            )
+                        Box {
+                            IconButton(onClick = { showSettingsMenu = true }) {
+                                Icon(
+                                    Icons.Filled.Settings,
+                                    contentDescription = "설정",
+                                    tint = SpotifyTextMuted
+                                )
+                            }
+                            DropdownMenu(expanded = showSettingsMenu, onDismissRequest = { showSettingsMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("NAS 음악 연결") },
+                                    onClick = { showSettingsMenu = false; showNasSettings = true }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("원격 제어 (호스트/리모컨)") },
+                                    onClick = { showSettingsMenu = false; showRemoteSettings = true }
+                                )
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -878,6 +902,19 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                             label = { Text("내 음악", style = MaterialTheme.typography.labelMedium) },
                             colors = navigationBarItemColors()
                         )
+                        if (remoteRole == RemoteRole.GUEST) NavigationBarItem(
+                            selected = selectedTab == 2,
+                            onClick = { selectedTab = 2 },
+                            icon = {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_remote),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            },
+                            label = { Text("리모컨", style = MaterialTheme.typography.labelMedium) },
+                            colors = navigationBarItemColors()
+                        )
                     }
                 }
             },
@@ -921,6 +958,10 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                         CircularProgressIndicator(color = SpotifyGreen)
                     }
                 } else when (selectedTab) {
+                    2 -> RemoteControlScreen(
+                        store = remoteSettingsStore,
+                        onOpenPairing = { showRemotePairing = true }
+                    )
                     0 -> RadioTabContent(
                         stations = stations,
                         selectedStationId = selectedStationId,
@@ -1075,6 +1116,39 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                 }
             }
         )
+    }
+
+    // 게스트 역할이 풀리면 리모컨 탭에 머물 수 없다.
+    LaunchedEffect(remoteRole) {
+        if (remoteRole != RemoteRole.GUEST && selectedTab == 2) selectedTab = 0
+    }
+
+    if (showRemoteSettings) {
+        RemoteSettingsDialog(
+            role = remoteRole,
+            hasPairing = remoteSettingsStore.getPairing() != null,
+            onRoleChange = { role ->
+                remoteSettingsStore.setRole(role)
+                remoteRole = role
+                RemoteHostService.syncWithRole(context)
+            },
+            onOpenPairing = { showRemoteSettings = false; showRemotePairing = true },
+            onDismiss = { showRemoteSettings = false }
+        )
+    }
+
+    if (showRemotePairing) {
+        // 페어링은 전체 화면(QR 표시/스캔). 끝나면 역할을 다시 읽는다 — 게스트 페어링은 화면 안에서 역할까지 정한다.
+        Surface(modifier = Modifier.fillMaxSize(), color = RadioBgDeep) {
+            val onDone = {
+                showRemotePairing = false
+                remoteRole = remoteSettingsStore.getRole()
+                RemoteHostService.syncWithRole(context)
+            }
+            if (remoteRole == RemoteRole.HOST) HostPairingScreen(store = remoteSettingsStore, onDone = onDone)
+            else GuestPairingScreen(store = remoteSettingsStore, onDone = onDone)
+        }
+        BackHandler { showRemotePairing = false; remoteRole = remoteSettingsStore.getRole() }
     }
 
     if (showNasSettings) {
@@ -2020,6 +2094,56 @@ private fun NasArtistHeaderRow(
             )
         }
     }
+}
+
+// 원격 제어 역할 선택. 호스트(벽걸이 태블릿)는 리모컨 대기 서비스를 상시 띄우고, 게스트(폰)는 리모컨 탭을 얻는다.
+@Composable
+private fun RemoteSettingsDialog(
+    role: RemoteRole,
+    hasPairing: Boolean,
+    onRoleChange: (RemoteRole) -> Unit,
+    onOpenPairing: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("원격 제어") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "벽걸이 태블릿을 '홈 플레이어'로, 폰을 '리모컨'으로 정하면 폰에서 태블릿의 재생과 블루투스 " +
+                        "스피커를 조작할 수 있습니다. 두 기기는 QR로 한 번 페어링합니다.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                listOf(
+                    RemoteRole.NONE to "사용 안 함",
+                    RemoteRole.HOST to "홈 플레이어 (호스트, 태블릿)",
+                    RemoteRole.GUEST to "리모컨 (게스트, 폰)"
+                ).forEach { (value, label) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().clickable { onRoleChange(value) }
+                    ) {
+                        RadioButton(selected = role == value, onClick = { onRoleChange(value) })
+                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                if (role != RemoteRole.NONE) {
+                    Text(
+                        if (hasPairing) "페어링됨" else "아직 페어링되지 않음",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (hasPairing) SpotifyGreen else SpotifyTextMuted
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (role != RemoteRole.NONE) TextButton(onClick = onOpenPairing) {
+                Text(if (role == RemoteRole.HOST) "페어링 QR 보기/만들기" else "QR 스캔으로 페어링")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("닫기") } }
+    )
 }
 
 @Composable
