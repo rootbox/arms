@@ -63,3 +63,6 @@ adb -s <serial> logcat -d | grep -c "okhttp.OkHttpClient"
 adb -s <serial> logcat -d | grep -c "GH.MsgNotifParser.*com.arms"
 adb -s <serial> logcat -d | grep -c "GH.MediaPlaybackMonitor: Invalid metadata"
 ```
+
+## 6. 진행 상태
+- **0.7.1-rc1 (2026-09-27, v21-rc1)**: A(알림 억제) + C(로깅 한정) 적용. S22에서 KBS 10분 재생 측정: `notification_enqueue` 0회(rc23은 같은 조건에서 약 100회), SecFgs `isForeground:true` 재호출 0, okhttp 로그 0줄, 크래시 0, 재생 유지. 시작 시 게시 3회(버퍼링→재생 상태 전환·정보 반영)는 의도한 동작. 정식 v20은 `release/0.7.0` 브랜치(rc28 코드, versionName만 0.7.0으로) 에서 태그한다.
