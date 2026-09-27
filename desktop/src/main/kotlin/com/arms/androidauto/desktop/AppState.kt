@@ -40,9 +40,14 @@ class AppState(private val scope: CoroutineScope) {
     )
     fun stationList() = stations
 
-    // 곡별 커버가 없는 스트리밍 채널은 번들 채널 아트로(회색 대신).
+    // 프로그램/곡 커버가 없을 때는 번들 채널 아트로(회색 대신). PNG는 tools/art/ChannelArt.java로 생성.
     private fun defaultArt(id: String): String? = when (id) {
-        "4" -> "res:/art_kpop_ballad.png"; "5" -> "res:/art_kpop_rewind.png"; else -> null
+        "1" -> "res:/art_ch_kbs.png"
+        "2" -> "res:/art_ch_sbs.png"
+        "3" -> "res:/art_ch_newhit.png"
+        "4" -> "res:/art_ch_ballad.png"
+        "5" -> "res:/art_ch_8090.png"
+        else -> null
     }
 
     init {

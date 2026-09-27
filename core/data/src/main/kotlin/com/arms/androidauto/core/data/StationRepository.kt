@@ -78,7 +78,7 @@ class StationRepository(context: Context) {
         )
     }
 
-    // 곡별 커버가 없는 스트리밍 채널(발라드/2세대)은 회색 대신 채널 아트를 보여준다.
+    // 프로그램/곡 커버가 없을 때(imageUrl == null) 회색 대신 채널 아트를 보여준다(채널 1~5 전부).
     // 앱에 번들된 리소스라 네트워크 없이 항상 정확하다. 폰(Coil)·차량(서비스 loadArtwork) 모두
     // android.resource:// URI를 읽을 수 있다.
     fun isInbandMetadataStation(stationId: String): Boolean = radioApiService.isInbandMetadataStation(stationId)
@@ -86,14 +86,7 @@ class StationRepository(context: Context) {
     suspend fun lookupTrackArtwork(streamTitle: String): String? =
         withContext(Dispatchers.IO) { radioApiService.lookupTrackArtwork(streamTitle) }
 
-    fun defaultArtworkUri(stationId: String): String? {
-        val res = when (stationId) {
-            "4" -> R.drawable.art_kpop_ballad
-            "5" -> R.drawable.art_kpop_rewind
-            else -> return null
-        }
-        return "android.resource://${appContext.packageName}/$res"
-    }
+    fun defaultArtworkUri(stationId: String): String? = defaultArtworkUri(appContext, stationId)
 
     // 다음 실행 시 자동 재개할 수 있도록 마지막으로 재생한 채널을 저장
     fun saveLastPlayedStationId(stationId: String) {
@@ -107,5 +100,19 @@ class StationRepository(context: Context) {
     companion object {
         private const val PREFS_NAME = "arms_radio_prefs"
         private const val KEY_LAST_PLAYED_STATION_ID = "last_played_station_id"
+
+        // 채널별 번들 아트(tools/art/ChannelArt.java로 생성). 목록 썸네일·재생 화면·차량 커버의
+        // 공통 기본값이라 Repository 인스턴스 없이도(컴포저블에서) 쓸 수 있게 companion에 둔다.
+        fun channelArtRes(stationId: String): Int? = when (stationId) {
+            "1" -> R.drawable.art_ch_kbs
+            "2" -> R.drawable.art_ch_sbs
+            "3" -> R.drawable.art_ch_newhit
+            "4" -> R.drawable.art_ch_ballad
+            "5" -> R.drawable.art_ch_8090
+            else -> null
+        }
+
+        fun defaultArtworkUri(context: Context, stationId: String): String? =
+            channelArtRes(stationId)?.let { "android.resource://${context.packageName}/$it" }
     }
 }

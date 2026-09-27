@@ -1158,6 +1158,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                 showRemotePairing = false
                 remoteRole = remoteSettingsStore.getRole()
                 RemoteHostService.syncWithRole(context)
+                // 게스트는 리모컨 탭을 열어야 연결을 시작한다. 페어링 직후 라디오 탭에 머물면 호스트가
+                // "폰 연결 기다리는 중"으로 남으므로(rc5 검증) 바로 리모컨 탭으로 보낸다.
+                if (remoteRole == RemoteRole.GUEST && remoteSettingsStore.getPairing() != null) selectedTab = 2
             }
             if (remoteRole == RemoteRole.HOST) HostPairingScreen(store = remoteSettingsStore, onDone = onDone)
             else GuestPairingScreen(store = remoteSettingsStore, onDone = onDone)
@@ -1983,6 +1986,9 @@ private fun ChannelRow(
             .padding(vertical = Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // 채널 아트 타일(번들 PNG, tools/art). 아트가 없는 채널만 예전 제네릭 아이콘.
+        val context = LocalContext.current
+        val channelArt = remember(station.id) { StationRepository.defaultArtworkUri(context, station.id) }
         Box(
             modifier = Modifier
                 .size(Sizes.listThumbnail)
@@ -1990,14 +1996,22 @@ private fun ChannelRow(
                 .background(YtSurfaceElevated),
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                painter = painterResource(
-                    if (station.type == StationType.STREAMING) R.drawable.ic_album else R.drawable.ic_radio
-                ),
-                contentDescription = null,
-                tint = if (isOnAir) YtTextPrimary else YtTextSecondary,
-                modifier = Modifier.size(Sizes.miniPlayerIcon + 2.dp)
-            )
+            if (channelArt != null) {
+                RetryingAsyncImage(
+                    url = channelArt,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    painter = painterResource(
+                        if (station.type == StationType.STREAMING) R.drawable.ic_album else R.drawable.ic_radio
+                    ),
+                    contentDescription = null,
+                    tint = if (isOnAir) YtTextPrimary else YtTextSecondary,
+                    modifier = Modifier.size(Sizes.miniPlayerIcon + 2.dp)
+                )
+            }
         }
 
         Spacer(modifier = Modifier.width(Spacing.lg))

@@ -1219,8 +1219,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         applyLoudnessCompensation(station.id)
         appliedStationId = null
         val base = createPlayableItem(station)
-        // 발라드/2세대는 채널 아트를 처음부터 싣는다 — 곡 정보(ICY)가 오기 전에도 차량에 커버가 보인다.
-        val art = if (stationRepository.isInbandMetadataStation(station.id)) channelArtwork(station.id) else null
+        // 채널 아트를 처음부터 싣는다 — 편성/곡 정보(폴링·ICY)가 오기 전에도 차량에 커버가 보인다.
+        // 지상파는 이후 프로그램 이미지가 오면 갱신 루프가 교체하고, 없으면(imageUrl null) 채널 아트가 유지된다.
+        val art = channelArtwork(station.id)
         art?.let { grantArtworkUriToAllControllers(it.uri) }
         return base.buildUpon()
             .setUri(android.net.Uri.parse(freshUrl))
@@ -1355,7 +1356,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // 세션 레거시 메타데이터에 비트맵이 곧바로 들어가 URI 접근 없이도 어디서나 커버가 보인다.
     private class Artwork(val uri: android.net.Uri, val data: ByteArray)
 
-    // 인밴드 채널의 번들 채널 아트는 한 번만 읽어 재사용한다(네트워크 0, 실패 여지 0).
+    // 번들 채널 아트(채널 1~5)는 한 번만 읽어 재사용한다(네트워크 0, 실패 여지 0).
     private val channelArtCache = HashMap<String, Artwork>()
     private suspend fun channelArtwork(stationId: String): Artwork? {
         channelArtCache[stationId]?.let { return it }
