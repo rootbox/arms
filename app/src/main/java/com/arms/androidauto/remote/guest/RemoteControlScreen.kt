@@ -29,6 +29,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.materialIcon
+import androidx.compose.material.icons.materialPath
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -39,6 +41,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -47,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -122,6 +128,7 @@ fun RemoteControlScreen(
     val pendingSeq by client.pendingSeq.collectAsState()
     val error by client.error.collectAsState()
     val lastAckResult by client.lastAckResult.collectAsState()
+    val revokedNotice by client.revokedNotice.collectAsState()
 
     // "n분 전" 계산용 현재 시각. 30초마다 갱신해 상태 줄이 저절로 늙는다.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -134,7 +141,7 @@ fun RemoteControlScreen(
     // 상태가 새로 오면 즉시 "지금"으로 맞춘다.
     LaunchedEffect(hostState?.updatedAtMs) { nowMs = System.currentTimeMillis() }
 
-    val status = GuestStatusPolicy.compute(paired, connectionState, hostState, nowMs)
+    val status = GuestStatusPolicy.compute(paired, connectionState, hostState, nowMs, revoked = revokedNotice)
     val canSend = GuestStatusPolicy.canSend(connectionState, pendingSeq)
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -156,6 +163,13 @@ fun RemoteControlScreen(
         containerColor = RadioBgDeep,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
+        if (revokedNotice) {
+            RevokedContent(
+                modifier = Modifier.fillMaxSize().padding(padding),
+                onOpenPairing = onOpenPairing,
+            )
+            return@Scaffold
+        }
         if (!paired) {
             NotPairedContent(
                 modifier = Modifier.fillMaxSize().padding(padding),
@@ -188,6 +202,17 @@ fun RemoteControlScreen(
                     onStop = { client.send(RemoteCommand.Stop) },
                 )
                 Spacer(Modifier.height(Spacing.xl))
+            }
+            val volume = hostState?.volumePercent
+            if (volume != null) {
+                item(key = "volume") {
+                    VolumeRow(
+                        hostVolume = volume,
+                        enabled = connectionState == ConnectionState.CONNECTED,
+                        onCommit = { client.setVolume(it) },
+                    )
+                    Spacer(Modifier.height(Spacing.xl))
+                }
             }
             item(key = "bluetooth") {
                 BluetoothCard(
@@ -286,13 +311,148 @@ private fun NotPairedContent(modifier: Modifier, onOpenPairing: () -> Unit) {
     }
 }
 
+// 호스트가 "연결 종료"를 눌러 페어링이 지워진 뒤의 전체 화면 안내.
+@Composable
+private fun RevokedContent(modifier: Modifier, onOpenPairing: () -> Unit) {
+    Column(
+        modifier = modifier.padding(Spacing.xl),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(Radius.lg),
+            colors = CardDefaults.cardColors(containerColor = SpotifySurface),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(Spacing.lg)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(Spacing.sm)
+                            .clip(CircleShape)
+                            .background(RadioOnAirRed),
+                    )
+                    Spacer(Modifier.width(Spacing.sm))
+                    Text(
+                        text = GuestStatusPolicy.label(GuestStatus.Revoked),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = SpotifyTextMuted,
+                    )
+                }
+                Spacer(Modifier.height(Spacing.md))
+                Text(
+                    text = GuestStatusPolicy.REVOKED_MESSAGE,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = SpotifyTextPrimary,
+                )
+                Spacer(Modifier.height(Spacing.lg))
+                Button(
+                    onClick = onOpenPairing,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = SpotifyGreen, contentColor = RadioBgDeep),
+                ) {
+                    Text("페어링", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+// 볼륨 줄: 아이콘 + 0..100 슬라이더. 드래그 중에는 손가락 값을, 그 외에는 호스트가 알려준 값을 보여준다.
+// 명령은 손을 뗄 때 한 번만 보낸다(클라이언트가 "동시에 하나"로 묶는다).
+@Composable
+private fun VolumeRow(
+    hostVolume: Int,
+    enabled: Boolean,
+    onCommit: (Int) -> Unit,
+) {
+    var dragging by remember { mutableStateOf(false) }
+    var sliderValue by remember { mutableFloatStateOf(hostVolume.toFloat()) }
+    // 손을 대고 있지 않을 때만 호스트 값을 따라간다.
+    LaunchedEffect(hostVolume, dragging) {
+        if (!dragging) sliderValue = hostVolume.toFloat()
+    }
+    val alpha = if (enabled) 1f else 0.4f
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = VolumeUpIcon,
+            contentDescription = "볼륨",
+            tint = SpotifyTextMuted.copy(alpha = alpha),
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(Modifier.width(Spacing.md))
+        Slider(
+            value = sliderValue,
+            onValueChange = {
+                dragging = true
+                sliderValue = it
+            },
+            onValueChangeFinished = {
+                dragging = false
+                onCommit(sliderValue.toInt())
+            },
+            valueRange = 0f..100f,
+            enabled = enabled,
+            colors = SliderDefaults.colors(
+                thumbColor = SpotifyGreen,
+                activeTrackColor = SpotifyGreen,
+                inactiveTrackColor = SpotifySurfaceElevated,
+                disabledThumbColor = SpotifyTextMuted,
+                disabledActiveTrackColor = SpotifyTextMuted,
+                disabledInactiveTrackColor = SpotifySurfaceElevated,
+            ),
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(Spacing.md))
+        Text(
+            text = "${sliderValue.toInt()}",
+            style = MaterialTheme.typography.labelLarge,
+            color = SpotifyTextMuted.copy(alpha = alpha),
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(32.dp),
+        )
+    }
+}
+
+// Material "volume_up" 아이콘. material-icons-core에는 없고 드로어블 추가는 이 화면 소유 범위 밖이라 여기서 그린다.
+private val VolumeUpIcon: ImageVector by lazy {
+    materialIcon(name = "Guest.VolumeUp") {
+        materialPath {
+            moveTo(3f, 9f)
+            verticalLineToRelative(6f)
+            horizontalLineToRelative(4f)
+            lineToRelative(5f, 5f)
+            verticalLineTo(4f)
+            lineTo(7f, 9f)
+            horizontalLineTo(3f)
+            close()
+            moveTo(16.5f, 12f)
+            curveToRelative(0f, -1.77f, -1.02f, -3.29f, -2.5f, -4.03f)
+            verticalLineToRelative(8.05f)
+            curveToRelative(1.48f, -0.73f, 2.5f, -2.25f, 2.5f, -4.02f)
+            close()
+            moveTo(14f, 3.23f)
+            verticalLineToRelative(2.06f)
+            curveToRelative(2.89f, 0.86f, 5f, 3.54f, 5f, 6.71f)
+            reflectiveCurveToRelative(-2.11f, 5.85f, -5f, 6.71f)
+            verticalLineToRelative(2.06f)
+            curveToRelative(4.01f, -0.91f, 7f, -4.49f, 7f, -8.77f)
+            reflectiveCurveToRelative(-2.99f, -7.86f, -7f, -8.77f)
+            close()
+        }
+    }
+}
+
 @Composable
 private fun StatusLine(status: GuestStatus, isBusy: Boolean, onOpenPairing: () -> Unit) {
     val dotColor = when (status) {
         GuestStatus.Live -> SpotifyGreen
         is GuestStatus.Stale, GuestStatus.NoStateYet -> Color(0xFFE0B341)
         GuestStatus.Connecting -> SpotifyTextMuted
-        GuestStatus.Offline, GuestStatus.NotPaired -> RadioOnAirRed
+        GuestStatus.Offline, GuestStatus.NotPaired, GuestStatus.Revoked -> RadioOnAirRed
     }
     Row(
         modifier = Modifier.fillMaxWidth(),

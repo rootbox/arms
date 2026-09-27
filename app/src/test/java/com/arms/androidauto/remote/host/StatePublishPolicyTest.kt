@@ -2,6 +2,7 @@ package com.arms.androidauto.remote.host
 
 import com.arms.androidauto.core.remote.BluetoothStatus
 import com.arms.androidauto.core.remote.HostState
+import com.arms.androidauto.core.remote.RemoteGuest
 import com.arms.androidauto.core.remote.RemoteItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,12 +18,19 @@ class StatePublishPolicyTest {
     private val playing = StateFingerprint(
         mediaId = "1", title = "볼륨을 높여요", artist = "KBS", isPlaying = true, playbackState = 3,
         artworkRef = "station:1", btConnected = true, btDeviceName = "거실 스피커", batteryBucket = 85, itemsKey = 7,
+        volumeBucket = 40, guestNames = listOf("Galaxy S22"), revoked = false,
     )
 
-    private fun state(battery: Int? = 87, updatedAt: Long = 0L, items: List<RemoteItem> = emptyList()) = HostState(
+    private fun state(
+        battery: Int? = 87,
+        updatedAt: Long = 0L,
+        items: List<RemoteItem> = emptyList(),
+        volume: Int? = 42,
+        guests: List<RemoteGuest> = listOf(RemoteGuest("Galaxy S22", 1_000L)),
+    ) = HostState(
         mediaId = "1", title = "볼륨을 높여요", artist = "KBS", isPlaying = true, playbackState = 3,
         artworkRef = "station:1", bluetooth = BluetoothStatus(true, "거실 스피커", 5L),
-        batteryPercent = battery, updatedAtMs = updatedAt, items = items,
+        batteryPercent = battery, updatedAtMs = updatedAt, items = items, volumePercent = volume, guests = guests,
     )
 
     // ---- decide ----
@@ -44,6 +52,9 @@ class StatePublishPolicyTest {
         assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(btConnected = false), 1_000L, 2_000L))
         assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(batteryBucket = 80), 1_000L, 2_000L))
         assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(itemsKey = 8), 1_000L, 2_000L))
+        assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(volumeBucket = 45), 1_000L, 2_000L))
+        assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(guestNames = emptyList()), 1_000L, 2_000L))
+        assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(revoked = true), 1_000L, 2_000L))
     }
 
     @Test
@@ -88,6 +99,17 @@ class StatePublishPolicyTest {
         assertNull(StatePublishPolicy.batteryBucket(null))
     }
 
+    @Test
+    fun volumeIsBucketedToFivePercent() {
+        assertEquals(0, StatePublishPolicy.volumeBucket(3))
+        assertEquals(40, StatePublishPolicy.volumeBucket(42))
+        assertEquals(40, StatePublishPolicy.volumeBucket(44))
+        assertEquals(45, StatePublishPolicy.volumeBucket(45))
+        assertEquals(100, StatePublishPolicy.volumeBucket(100))
+        assertEquals(100, StatePublishPolicy.volumeBucket(130))
+        assertNull(StatePublishPolicy.volumeBucket(null))
+    }
+
     // ---- fingerprintOf ----
 
     @Test
@@ -103,6 +125,34 @@ class StatePublishPolicyTest {
         assertNotEquals(a, StatePublishPolicy.fingerprintOf(state(battery = 84)))
         val items = listOf(RemoteItem("1", "KBS Cool FM", "89.1"))
         assertNotEquals(a, StatePublishPolicy.fingerprintOf(state(battery = 85, items = items)))
+    }
+
+    @Test
+    fun fingerprintIgnoresSmallVolumeDriftButNotBucketCrossing() {
+        val a = StatePublishPolicy.fingerprintOf(state(volume = 40))
+        assertEquals(a, StatePublishPolicy.fingerprintOf(state(volume = 44)))
+        assertNotEquals(a, StatePublishPolicy.fingerprintOf(state(volume = 45)))
+        assertNotEquals(a, StatePublishPolicy.fingerprintOf(state(volume = null)))
+    }
+
+    @Test
+    fun fingerprintTracksGuestNamesButNotLastSeen() {
+        val a = StatePublishPolicy.fingerprintOf(state(guests = listOf(RemoteGuest("Galaxy S22", 1_000L))))
+        // 60초마다 오는 Hello로 lastSeen만 바뀌면 다시 publish 하지 않는다.
+        assertEquals(a, StatePublishPolicy.fingerprintOf(state(guests = listOf(RemoteGuest("Galaxy S22", 61_000L)))))
+        // 게스트가 붙거나 떨어지면 publish.
+        assertNotEquals(a, StatePublishPolicy.fingerprintOf(state(guests = emptyList())))
+        assertNotEquals(a, StatePublishPolicy.fingerprintOf(state(guests = listOf(RemoteGuest("Galaxy S22", 1L), RemoteGuest("Galaxy S24", 2L)))))
+        assertEquals(listOf("Galaxy S22"), a.guestNames)
+        assertFalse(a.revoked)
+    }
+
+    @Test
+    fun fingerprintChangesWhenRevoked() {
+        val a = StatePublishPolicy.fingerprintOf(state())
+        val revoked = StatePublishPolicy.fingerprintOf(state().copy(revoked = true))
+        assertNotEquals(a, revoked)
+        assertTrue(revoked.revoked)
     }
 
     @Test

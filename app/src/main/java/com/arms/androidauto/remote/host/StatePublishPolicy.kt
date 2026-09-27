@@ -3,7 +3,8 @@ package com.arms.androidauto.remote.host
 import com.arms.androidauto.core.remote.HostState
 
 // "보이는 값"만 뽑은 지문. 이 값이 그대로면 상태를 다시 publish 하지 않는다.
-// updatedAtMs는 제외(매번 바뀌므로), 배터리는 5% 단위로 뭉개서 1%마다 publish 하지 않게 한다.
+// updatedAtMs는 제외(매번 바뀌므로), 배터리·볼륨은 5% 단위로 뭉개서 1%마다 publish 하지 않게 한다.
+// 게스트는 이름 목록만(lastSeen 갱신은 60초마다 오므로 지문에 넣으면 매번 publish 하게 된다).
 data class StateFingerprint(
     val mediaId: String?,
     val title: String?,
@@ -16,6 +17,9 @@ data class StateFingerprint(
     val batteryBucket: Int?,
     // 채널 목록이 나중에(DB 로드 뒤) 도착해도 게스트가 받도록 목록 변화도 지문에 넣는다.
     val itemsKey: Int,
+    val volumeBucket: Int?,
+    val guestNames: List<String>,
+    val revoked: Boolean,
 )
 
 sealed class PublishDecision {
@@ -60,9 +64,13 @@ class StatePublishPolicy(
         const val DEFAULT_DEBOUNCE_MS = 500L
         const val DEFAULT_HEARTBEAT_MS = 5 * 60_000L
         const val BATTERY_BUCKET_PERCENT = 5
+        const val VOLUME_BUCKET_PERCENT = 5
 
-        fun batteryBucket(percent: Int?): Int? =
-            percent?.coerceIn(0, 100)?.let { it / BATTERY_BUCKET_PERCENT * BATTERY_BUCKET_PERCENT }
+        fun batteryBucket(percent: Int?): Int? = bucket(percent, BATTERY_BUCKET_PERCENT)
+
+        fun volumeBucket(percent: Int?): Int? = bucket(percent, VOLUME_BUCKET_PERCENT)
+
+        private fun bucket(percent: Int?, size: Int): Int? = percent?.coerceIn(0, 100)?.let { it / size * size }
 
         fun fingerprintOf(state: HostState): StateFingerprint = StateFingerprint(
             mediaId = state.mediaId,
@@ -75,6 +83,9 @@ class StatePublishPolicy(
             btDeviceName = state.bluetooth?.deviceName,
             batteryBucket = batteryBucket(state.batteryPercent),
             itemsKey = state.items.hashCode(),
+            volumeBucket = volumeBucket(state.volumePercent),
+            guestNames = state.guests.map { it.name },
+            revoked = state.revoked,
         )
     }
 }

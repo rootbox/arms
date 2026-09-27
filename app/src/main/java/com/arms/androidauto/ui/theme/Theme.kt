@@ -7,28 +7,42 @@ import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
-// Spotify 느낌의 항상 어두운 팔레트 (다이나믹 컬러는 사용하지 않음): near-black 배경에
-// 단일 그린 강조색.
-private val SpotifyColorScheme = darkColorScheme(
-    primary = SpotifyGreen,
-    onPrimary = SpotifyBlack,
-    primaryContainer = SpotifySurfaceElevated,
-    onPrimaryContainer = SpotifyGreen,
-    secondary = SpotifyGreen,
-    onSecondary = SpotifyBlack,
-    tertiary = SpotifyGreen,
-    background = SpotifyBlack,
-    onBackground = SpotifyTextPrimary,
-    surface = SpotifyBlackElevated,
-    onSurface = SpotifyTextPrimary,
-    surfaceVariant = SpotifySurfaceElevated,
-    onSurfaceVariant = SpotifyTextMuted,
-    error = SpotifyLiveRed,
-    onError = SpotifyTextPrimary
+// YouTube Music 느낌의 항상 어두운 팔레트 (다이나믹 컬러는 사용하지 않음).
+// primary는 흰색이라 Button/RadioButton/TextButton/Slider가 기본값만으로 "흰 컨트롤 + 검정 글자"가 된다.
+// surfaceContainer* 계열까지 지정해야 AlertDialog/DropdownMenu/NavigationBar가 M3 기본의
+// 보라빛 회색 대신 우리 회색(#212121/#282828)을 쓴다.
+private val YtColorScheme = darkColorScheme(
+    primary = YtAccent,
+    onPrimary = YtBackground,
+    primaryContainer = YtSurfaceElevated,
+    onPrimaryContainer = YtTextPrimary,
+    secondary = YtTextSecondary,
+    onSecondary = YtBackground,
+    secondaryContainer = YtSurfaceElevated,
+    onSecondaryContainer = YtTextPrimary,
+    tertiary = YtRed,
+    onTertiary = YtTextPrimary,
+    background = YtBackground,
+    onBackground = YtTextPrimary,
+    surface = YtBackground,
+    onSurface = YtTextPrimary,
+    surfaceVariant = YtSurfaceElevated,
+    onSurfaceVariant = YtTextSecondary,
+    surfaceDim = YtBackdrop,
+    surfaceBright = YtSurfaceHighest,
+    surfaceContainerLowest = YtBackdrop,
+    surfaceContainerLow = YtBackground,
+    surfaceContainer = YtSurface,
+    surfaceContainerHigh = YtSurfaceElevated,
+    surfaceContainerHighest = YtSurfaceHighest,
+    outline = YtDivider,
+    outlineVariant = YtDivider,
+    error = YtRed,
+    onError = YtTextPrimary
 )
 
 // 카드/다이얼로그/텍스트필드가 같은 곡률을 쓰도록 모양도 토큰으로 통일한다.
-private val SpotifyShapes = Shapes(
+private val YtShapes = Shapes(
     extraSmall = RoundedCornerShape(Radius.sm),
     small = RoundedCornerShape(Radius.md),
     medium = RoundedCornerShape(Radius.lg),
@@ -43,9 +57,9 @@ fun ARMSAndroidAutoTheme(
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = SpotifyColorScheme,
+        colorScheme = YtColorScheme,
         typography = Typography,
-        shapes = SpotifyShapes,
+        shapes = YtShapes,
         content = content
     )
 }

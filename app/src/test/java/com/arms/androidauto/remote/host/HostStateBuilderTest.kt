@@ -5,6 +5,7 @@ import com.arms.androidauto.core.model.NasAlbum
 import com.arms.androidauto.core.model.Station
 import com.arms.androidauto.core.model.StationType
 import com.arms.androidauto.core.remote.BluetoothStatus
+import com.arms.androidauto.core.remote.RemoteGuest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -123,6 +124,22 @@ class HostStateBuilderTest {
         assertEquals(87, state.batteryPercent)
         assertEquals(12345L, state.updatedAtMs)
         assertEquals(3, state.items.size)
+        // 기본값: 볼륨 모름, 게스트 없음, 연결 종료 아님.
+        assertNull(state.volumePercent)
+        assertTrue(state.guests.isEmpty())
+        assertFalse(state.revoked)
+    }
+
+    @Test
+    fun buildCarriesVolumeGuestsAndRevoked() {
+        val guests = listOf(RemoteGuest("Galaxy S22", 100L), RemoteGuest("Galaxy S24", 200L))
+        val state = HostStateBuilder.build(radio(), stations, null, 50, 1L, volumePercent = 42, guests = guests, revoked = true)
+        assertEquals(42, state.volumePercent)
+        assertEquals(guests, state.guests)
+        assertTrue(state.revoked)
+        // 볼륨도 배터리처럼 0..100으로 자른다.
+        assertEquals(100, HostStateBuilder.build(radio(), stations, null, null, 1L, volumePercent = 250).volumePercent)
+        assertEquals(0, HostStateBuilder.build(radio(), stations, null, null, 1L, volumePercent = -3).volumePercent)
     }
 
     @Test

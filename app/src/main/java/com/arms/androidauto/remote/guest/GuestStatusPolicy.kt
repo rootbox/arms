@@ -14,6 +14,8 @@ sealed class GuestStatus {
     object Live : GuestStatus()
     // 태블릿이 절전 등으로 갱신을 멈춘 상태. 마지막 갱신으로부터 몇 분 지났는지 함께 표시.
     data class Stale(val minutesAgo: Long) : GuestStatus()
+    // 호스트가 "연결 종료"를 눌렀다. 페어링은 이미 지워졌고, 다시 쓰려면 새 QR로 페어링해야 한다.
+    object Revoked : GuestStatus()
 }
 
 object GuestStatusPolicy {
@@ -22,13 +24,23 @@ object GuestStatusPolicy {
     // 명령 후 이 시간 안에 ack가 없으면 "태블릿 응답 없음"(플랜 §5).
     const val ACK_TIMEOUT_MS = 5_000L
     const val NO_ACK_MESSAGE = "태블릿 응답 없음"
+    // 리모컨 화면이 열려 있는 동안 호스트에게 "붙어 있음"을 알리는 주기. 호스트는 3분 동안 소식이 없으면 정리한다.
+    const val HELLO_INTERVAL_MS = 60_000L
+    // 호스트가 연결을 종료했을 때 게스트 화면에 띄우는 안내.
+    const val REVOKED_MESSAGE = "호스트가 연결을 종료했습니다. 다시 사용하려면 태블릿에서 QR을 새로 만들어 페어링하세요."
+    // Hello에 담는 기기 이름의 최대 길이(모델명 정도만, 사용자 이름은 절대 넣지 않는다).
+    const val MAX_GUEST_NAME_LENGTH = 40
+    private const val DEFAULT_GUEST_NAME = "Android"
 
     fun compute(
         paired: Boolean,
         connectionState: ConnectionState,
         hostState: HostState?,
         nowMs: Long,
+        revoked: Boolean = false,
     ): GuestStatus {
+        // 호스트가 끊은 뒤에는 연결 상태·페어링 여부보다 안내가 우선이다.
+        if (revoked) return GuestStatus.Revoked
         if (!paired) return GuestStatus.NotPaired
         return when (connectionState) {
             ConnectionState.CONNECTING -> GuestStatus.Connecting
@@ -49,7 +61,25 @@ object GuestStatusPolicy {
         GuestStatus.NoStateYet -> "태블릿 · 연결됨 · 상태 기다리는 중"
         GuestStatus.Live -> "태블릿 · 연결됨"
         is GuestStatus.Stale -> "태블릿 · 마지막 갱신 ${formatMinutesAgo(status.minutesAgo)}"
+        GuestStatus.Revoked -> "태블릿 · 호스트가 연결을 종료함"
     }
+
+    // Hello에 담을 게스트 이름. Build.MODEL(예: "SM-S937N")을 그대로 쓰되 공백 정리·길이 제한만 한다.
+    // 사용자 이름이 섞일 수 있는 값(기기 이름 설정, 계정)은 받지 않는다 — 호출자가 모델명만 넘긴다.
+    fun guestName(model: String?, manufacturer: String? = null): String {
+        val raw = model?.takeIf { it.isNotBlank() } ?: manufacturer?.takeIf { it.isNotBlank() } ?: DEFAULT_GUEST_NAME
+        val cleaned = raw
+            .map { if (it.isWhitespace()) ' ' else it } // 탭·줄바꿈은 공백으로(제어 문자로 지워지기 전에)
+            .filter { !it.isISOControl() }
+            .joinToString("")
+            .trim()
+            .replace(Regex(" +"), " ")
+        if (cleaned.isEmpty()) return DEFAULT_GUEST_NAME
+        return cleaned.take(MAX_GUEST_NAME_LENGTH)
+    }
+
+    // 볼륨 명령 값. 슬라이더가 0..100 밖의 값을 만들지는 않지만 프로토콜 경계를 여기서 한 번 더 지킨다.
+    fun clampVolume(percent: Int): Int = percent.coerceIn(0, 100)
 
     // "artworkRef" 해석. "station:<id>" → 번들 채널 아트 id, http(s) URL → 공개 커버, 그 외 → null.
     sealed class Artwork {

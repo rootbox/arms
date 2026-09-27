@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose 테마(ui/theme/Color.kt)의 YtBackground와 같은 값. 창 배경/시스템 바가 첫 프레임부터
+         같은 near-black이 되도록 XML 테마에서 쓴다. -->
+    <color name="yt_background">#FF0F0F0F</color>
+</resources>

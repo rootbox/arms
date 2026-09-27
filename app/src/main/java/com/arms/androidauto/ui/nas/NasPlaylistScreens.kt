@@ -52,13 +52,15 @@ import androidx.compose.ui.unit.dp
 import com.arms.androidauto.R
 import com.arms.androidauto.core.model.NasPlaylist
 import com.arms.androidauto.core.model.NasPlaylistTrack
-import com.arms.androidauto.ui.theme.RadioBgDeep
+import com.arms.androidauto.ui.components.EqualizerBars
 import com.arms.androidauto.ui.theme.Radius
 import com.arms.androidauto.ui.theme.Sizes
 import com.arms.androidauto.ui.theme.Spacing
-import com.arms.androidauto.ui.theme.SpotifyGreen
-import com.arms.androidauto.ui.theme.SpotifySurfaceElevated
-import com.arms.androidauto.ui.theme.SpotifyTextMuted
+import com.arms.androidauto.ui.theme.YtAccent
+import com.arms.androidauto.ui.theme.YtBackground
+import com.arms.androidauto.ui.theme.YtRed
+import com.arms.androidauto.ui.theme.YtSurfaceElevated
+import com.arms.androidauto.ui.theme.YtTextSecondary
 
 @Composable
 fun NasPlaylistListContent(
@@ -75,7 +77,7 @@ fun NasPlaylistListContent(
             Icon(
                 painter = painterResource(R.drawable.ic_library_music),
                 contentDescription = null,
-                tint = SpotifyTextMuted,
+                tint = YtTextSecondary,
                 modifier = Modifier.size(56.dp)
             )
             Spacer(modifier = Modifier.height(Spacing.lg))
@@ -88,7 +90,7 @@ fun NasPlaylistListContent(
             Text(
                 "앨범에서 곡 옆의 + 를 눌러\n원하는 곡을 담아보세요",
                 style = MaterialTheme.typography.bodySmall,
-                color = SpotifyTextMuted,
+                color = YtTextSecondary,
                 textAlign = TextAlign.Center
             )
         }
@@ -112,14 +114,14 @@ fun NasPlaylistListContent(
                 Box(
                     modifier = Modifier
                         .size(Sizes.listThumbnail)
-                        .clip(RoundedCornerShape(Radius.sm))
-                        .background(SpotifySurfaceElevated),
+                        .clip(RoundedCornerShape(Radius.md))
+                        .background(YtSurfaceElevated),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         painter = painterResource(R.drawable.ic_library_music),
                         contentDescription = null,
-                        tint = if (isPlaying) SpotifyGreen else SpotifyTextMuted,
+                        tint = YtTextSecondary,
                         modifier = Modifier.size(Sizes.miniPlayerIcon)
                     )
                 }
@@ -128,15 +130,20 @@ fun NasPlaylistListContent(
                     Text(
                         playlist.name,
                         style = MaterialTheme.typography.titleMedium,
-                        color = if (isPlaying) SpotifyGreen else MaterialTheme.colorScheme.onSurface,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         "${playlist.songCount}곡",
                         style = MaterialTheme.typography.bodySmall,
-                        color = SpotifyTextMuted
+                        color = YtTextSecondary
                     )
+                }
+                // 재생 중인 플레이리스트는 오른쪽 끝에 빨간 이퀄라이저
+                if (isPlaying) {
+                    Spacer(modifier = Modifier.width(Spacing.sm))
+                    EqualizerBars(isAnimating = true)
                 }
             }
         }
@@ -182,7 +189,7 @@ fun NasPlaylistDetailScreen(
                     Icon(
                         imageVector = Icons.Filled.MoreVert,
                         contentDescription = "더보기",
-                        tint = SpotifyTextMuted
+                        tint = YtTextSecondary
                     )
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
@@ -220,8 +227,8 @@ fun NasPlaylistDetailScreen(
                         enabled = tracks.isNotEmpty(),
                         shape = RoundedCornerShape(Radius.xxl),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = SpotifyGreen,
-                            contentColor = RadioBgDeep
+                            containerColor = YtAccent,
+                            contentColor = YtBackground
                         )
                     ) {
                         Icon(
@@ -236,7 +243,7 @@ fun NasPlaylistDetailScreen(
                     Text(
                         "${tracks.size}곡",
                         style = MaterialTheme.typography.bodySmall,
-                        color = SpotifyTextMuted
+                        color = YtTextSecondary
                     )
                 }
             }
@@ -268,8 +275,8 @@ fun NasPlaylistDetailScreen(
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = SpotifyGreen,
-                        unfocusedBorderColor = SpotifyTextMuted.copy(alpha = 0.3f)
+                        focusedBorderColor = YtAccent,
+                        unfocusedBorderColor = YtTextSecondary.copy(alpha = 0.3f)
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -301,10 +308,11 @@ fun NasPlaylistDetailScreen(
                 )
             },
             confirmButton = {
+                // 되돌릴 수 없는 동작은 빨강
                 TextButton(onClick = {
                     showDeleteConfirm = false
                     onDelete()
-                }) { Text("삭제") }
+                }) { Text("삭제", color = YtRed) }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("취소") }

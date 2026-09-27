@@ -14,7 +14,7 @@ object Spacing {
     val xxl = 32.dp
     val huge = 48.dp
 
-    // 화면 좌우 기본 여백 (Spotify와 동일하게 16dp)
+    // 화면 좌우 기본 여백 (YouTube Music과 동일하게 16dp)
     val screenHorizontal = lg
 }
 
@@ -26,13 +26,20 @@ object Radius {
     val xxl = 24.dp
 }
 
-// 목록 썸네일/재생 버튼처럼 반복해서 쓰는 크기
+// 목록 썸네일/재생 버튼처럼 반복해서 쓰는 크기 (YouTube Music 기준)
 object Sizes {
-    val listThumbnail = 48.dp
-    val miniPlayerThumbnail = 40.dp
+    // 목록 행 썸네일 56dp, 모서리 Radius.md(8dp)
+    val listThumbnail = 56.dp
+    // 미니플레이어: 48dp 커버, 상단 2dp 진행/라이브 선
+    val miniPlayerThumbnail = 48.dp
     val miniPlayerButton = 40.dp
-    val miniPlayerIcon = 20.dp
-    val playerPrimaryButton = 72.dp
+    val miniPlayerIcon = 24.dp
+    val miniPlayerProgress = 2.dp
+    // 전체화면 플레이어: 64dp 흰 원형 재생 버튼, 이전/다음은 40dp 흰 아이콘
+    val playerPrimaryButton = 64.dp
     val playerSecondaryButton = 48.dp
     val playerIcon = 32.dp
+    val playerSkipIcon = 40.dp
+    // 재생 중 표시용 작은 이퀄라이저
+    val equalizerHeight = 16.dp
 }

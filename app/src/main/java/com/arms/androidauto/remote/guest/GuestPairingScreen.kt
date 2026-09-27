@@ -1,8 +1,14 @@
 package com.arms.androidauto.remote.guest
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -24,16 +31,25 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.arms.androidauto.core.remote.Pairing
 import com.arms.androidauto.remote.RemoteRole
 import com.arms.androidauto.remote.RemoteSettingsStore
@@ -45,8 +61,12 @@ import com.arms.androidauto.ui.theme.SpotifyGreen
 import com.arms.androidauto.ui.theme.SpotifySurface
 import com.arms.androidauto.ui.theme.SpotifyTextMuted
 import com.arms.androidauto.ui.theme.SpotifyTextPrimary
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.ResultPoint
+import com.journeyapps.barcodescanner.BarcodeCallback
+import com.journeyapps.barcodescanner.BarcodeResult
+import com.journeyapps.barcodescanner.DecoratedBarcodeView
+import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import java.net.URI
 
 // 게스트(폰) 페어링 화면. 태블릿이 띄운 QR을 스캔해 페어링(키 포함)을 암호화 저장소에 넣는다.
@@ -56,10 +76,14 @@ fun GuestPairingScreen(
     store: RemoteSettingsStore,
     onDone: () -> Unit,
 ) {
+    val context = LocalContext.current
     var pairing by remember { mutableStateOf(store.getPairing()) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var hintText by remember { mutableStateOf<String?>(null) }
     var manualCode by remember { mutableStateOf("") }
+    // 스캐너는 사용자가 "QR 스캔"을 눌렀을 때만 연다(첫 진입에서 카메라가 저절로 켜지지 않는다).
+    var showScanner by remember { mutableStateOf(false) }
+    var confirmUnpair by remember { mutableStateOf(false) }
 
     fun accept(text: String?): Boolean {
         val parsed = text?.trim()?.takeIf { it.isNotEmpty() }?.let { Pairing.fromQrText(it) }
@@ -69,6 +93,8 @@ fun GuestPairingScreen(
         }
         store.savePairing(parsed)
         store.setRole(RemoteRole.GUEST)
+        // pairId 앞 4자만. 키·브로커 URL·계정은 로그에 남기지 않는다.
+        Log.i("ARMS", "리모컨 게스트: 페어링 저장 (pair ${parsed.pairId.take(4)}…)")
         pairing = parsed
         errorText = null
         hintText = null
@@ -76,14 +102,60 @@ fun GuestPairingScreen(
         return true
     }
 
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val contents = result.contents
-        if (contents == null) {
-            // 취소했거나 카메라 권한이 거부된 경우(스캐너가 권한을 직접 요청하고, 거부되면 취소로 돌아온다).
-            hintText = "스캔이 취소되었거나 카메라 권한이 없습니다. 설정에서 카메라 권한을 허용하거나 아래에 코드를 직접 입력하세요."
-        } else if (accept(contents)) {
-            onDone()
+    // 카메라 권한은 여기서 직접 묻는다. 라이브러리의 CaptureActivity(가로 고정)를 쓰지 않고 이 화면 안에
+    // 세로 스캐너를 띄우기 때문.
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            showScanner = true
+        } else {
+            hintText = "카메라 권한이 없습니다. 설정에서 카메라 권한을 허용하거나 아래에 코드를 직접 입력하세요."
         }
+    }
+    fun openScanner() {
+        errorText = null
+        hintText = null
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (granted) showScanner = true else permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    if (showScanner) {
+        InlineQrScanner(
+            onResult = { text ->
+                showScanner = false
+                if (accept(text)) onDone()
+            },
+            onClose = {
+                showScanner = false
+                hintText = "스캔을 취소했습니다. 다시 스캔하거나 아래에 코드를 직접 입력하세요."
+            },
+        )
+        return
+    }
+
+    if (confirmUnpair) {
+        AlertDialog(
+            onDismissRequest = { confirmUnpair = false },
+            title = { Text("페어링 해제") },
+            text = { Text("이 폰의 리모컨 페어링을 지웁니다. 계속할까요?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmUnpair = false
+                        store.clearPairing()
+                        store.setRole(RemoteRole.NONE)
+                        Log.i("ARMS", "리모컨 게스트: 페어링 해제")
+                        pairing = null
+                        errorText = null
+                        hintText = null
+                    },
+                ) {
+                    Text("해제", color = RadioOnAirRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmUnpair = false }) { Text("취소") }
+            },
+        )
     }
 
     Column(
@@ -141,13 +213,7 @@ fun GuestPairingScreen(
             Spacer(Modifier.height(Spacing.xl))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 OutlinedButton(
-                    onClick = {
-                        store.clearPairing()
-                        store.setRole(RemoteRole.NONE)
-                        pairing = null
-                        errorText = null
-                        hintText = null
-                    },
+                    onClick = { confirmUnpair = true },
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = RadioOnAirRed),
                 ) {
                     Text("페어링 해제")
@@ -171,18 +237,7 @@ fun GuestPairingScreen(
         Spacer(Modifier.height(Spacing.xl))
 
         Button(
-            onClick = {
-                errorText = null
-                hintText = null
-                scanLauncher.launch(
-                    ScanOptions().apply {
-                        setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                        setPrompt("태블릿 화면의 QR을 스캔하세요")
-                        setOrientationLocked(true)
-                        setBeepEnabled(false)
-                    },
-                )
-            },
+            onClick = { openScanner() },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = SpotifyGreen, contentColor = RadioBgDeep),
         ) {
@@ -257,6 +312,76 @@ fun GuestPairingScreen(
             }
         }
         Spacer(Modifier.height(48.dp))
+    }
+}
+
+// 페어링 화면 안에 띄우는 세로 QR 스캐너. 라이브러리의 CaptureActivity는 자체 매니페스트가 sensorLandscape로
+// 고정돼 있어(ScanOptions.setOrientationLocked로는 못 바꾸고 매니페스트 override가 필요) 별도 액티비티 대신
+// DecoratedBarcodeView를 이 화면에 직접 넣는다. 그러면 앱 화면 방향(폰=세로)을 그대로 따른다.
+@Composable
+private fun InlineQrScanner(
+    onResult: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var handled by remember { mutableStateOf(false) }
+    var scannerView by remember { mutableStateOf<DecoratedBarcodeView?>(null) }
+
+    BackHandler(onBack = onClose)
+
+    DisposableEffect(lifecycleOwner, scannerView) {
+        val view = scannerView
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> view?.resume()
+                Lifecycle.Event.ON_PAUSE -> view?.pause()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) view?.resume()
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            view?.pause()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(RadioBgDeep)) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                DecoratedBarcodeView(ctx).apply {
+                    barcodeView.decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
+                    setStatusText("태블릿 화면의 QR을 스캔하세요")
+                    decodeSingle(object : BarcodeCallback {
+                        override fun barcodeResult(result: BarcodeResult) {
+                            if (handled) return
+                            val text = result.text ?: return
+                            handled = true
+                            pause()
+                            onResult(text)
+                        }
+
+                        override fun possibleResultPoints(resultPoints: MutableList<ResultPoint>) = Unit
+                    })
+                    scannerView = this
+                }
+            },
+        )
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.screenHorizontal, vertical = Spacing.xl),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            OutlinedButton(
+                onClick = onClose,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = SpotifyTextPrimary),
+            ) {
+                Text("닫기")
+            }
+        }
     }
 }
 

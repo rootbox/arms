@@ -114,4 +114,43 @@ class GuestStatusPolicyTest {
         assertEquals(120_000L, GuestStatusPolicy.STALE_AFTER_MS)
         assertEquals("태블릿 응답 없음", GuestStatusPolicy.NO_ACK_MESSAGE)
     }
+
+    @Test fun `Hello 주기는 60초, 호스트 정리 기준(3분)보다 짧다`() {
+        assertEquals(60_000L, GuestStatusPolicy.HELLO_INTERVAL_MS)
+        assertTrue(GuestStatusPolicy.HELLO_INTERVAL_MS < 3 * 60_000L)
+    }
+
+    @Test fun `호스트가 연결을 종료하면 다른 조건보다 REVOKED가 우선`() {
+        // 페어링이 지워진 뒤(paired=false)에도, 아직 연결돼 있는 순간에도 안내가 우선이다.
+        assertEquals(GuestStatus.Revoked, GuestStatusPolicy.compute(false, ConnectionState.DISCONNECTED, null, now, revoked = true))
+        assertEquals(GuestStatus.Revoked, GuestStatusPolicy.compute(true, ConnectionState.CONNECTED, state(now), now, revoked = true))
+        assertEquals(GuestStatus.Revoked, GuestStatusPolicy.compute(true, ConnectionState.CONNECTING, null, now, revoked = true))
+        // 기본값(revoked=false)은 기존 동작 그대로.
+        assertEquals(GuestStatus.Live, GuestStatusPolicy.compute(true, ConnectionState.CONNECTED, state(now), now))
+        assertEquals("태블릿 · 호스트가 연결을 종료함", GuestStatusPolicy.label(GuestStatus.Revoked))
+        assertTrue(GuestStatusPolicy.REVOKED_MESSAGE.contains("QR"))
+    }
+
+    @Test fun `게스트 이름은 모델명 그대로, 공백 정리와 40자 제한만`() {
+        assertEquals("SM-S937N", GuestStatusPolicy.guestName("SM-S937N"))
+        assertEquals("SM-S937N", GuestStatusPolicy.guestName("  SM-S937N \n"))
+        assertEquals("Pixel 8 Pro", GuestStatusPolicy.guestName("Pixel   8\tPro"))
+        // 모델명이 비면 제조사, 그것도 없으면 기본값.
+        assertEquals("samsung", GuestStatusPolicy.guestName("", "samsung"))
+        assertEquals("Android", GuestStatusPolicy.guestName(null, null))
+        assertEquals("Android", GuestStatusPolicy.guestName(" ", " "))
+        // 제어 문자만 있는 값은 기본값.
+        assertEquals("Android", GuestStatusPolicy.guestName("\u0000\u0001"))
+        val long = "X".repeat(100)
+        assertEquals(40, GuestStatusPolicy.guestName(long).length)
+        assertEquals(40, GuestStatusPolicy.MAX_GUEST_NAME_LENGTH)
+    }
+
+    @Test fun `볼륨은 0에서 100 사이로 자른다`() {
+        assertEquals(0, GuestStatusPolicy.clampVolume(-5))
+        assertEquals(0, GuestStatusPolicy.clampVolume(0))
+        assertEquals(37, GuestStatusPolicy.clampVolume(37))
+        assertEquals(100, GuestStatusPolicy.clampVolume(100))
+        assertEquals(100, GuestStatusPolicy.clampVolume(140))
+    }
 }

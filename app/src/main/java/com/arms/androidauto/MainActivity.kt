@@ -10,18 +10,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,11 +33,13 @@ import com.arms.androidauto.remote.RemoteSettingsStore
 import com.arms.androidauto.remote.guest.GuestPairingScreen
 import com.arms.androidauto.remote.guest.RemoteControlScreen
 import com.arms.androidauto.remote.host.HostPairingScreen
+import com.arms.androidauto.remote.host.HostStatusChip
 import com.arms.androidauto.remote.host.RemoteHostService
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
@@ -57,7 +53,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.Player
@@ -81,21 +76,21 @@ import com.arms.androidauto.ui.nas.AddToPlaylistDialog
 import com.arms.androidauto.ui.nas.NasAlbumDetailScreen
 import com.arms.androidauto.ui.nas.NasPlaylistDetailScreen
 import com.arms.androidauto.ui.nas.NasPlaylistListContent
+import com.arms.androidauto.ui.components.EqualizerBars
+import com.arms.androidauto.ui.components.OnAirTag
 import com.arms.androidauto.ui.theme.ARMSAndroidAutoTheme
-import com.arms.androidauto.ui.theme.RadioBgDeep
-import com.arms.androidauto.ui.theme.RadioBgMid
-import com.arms.androidauto.ui.theme.RadioNeonCyan
-import com.arms.androidauto.ui.theme.RadioNeonMagenta
-import com.arms.androidauto.ui.theme.RadioNeonOrange
-import com.arms.androidauto.ui.theme.RadioOnAirRed
-import com.arms.androidauto.ui.theme.SpotifyBlackElevated
-import com.arms.androidauto.ui.theme.SpotifyGreen
 import com.arms.androidauto.ui.theme.Radius
 import com.arms.androidauto.ui.theme.Sizes
 import com.arms.androidauto.ui.theme.Spacing
-import com.arms.androidauto.ui.theme.SpotifySurfaceElevated
-import com.arms.androidauto.ui.theme.SpotifyTextMuted
-import com.arms.androidauto.ui.theme.SpotifyTextPrimary
+import com.arms.androidauto.ui.theme.YtAccent
+import com.arms.androidauto.ui.theme.YtBackdrop
+import com.arms.androidauto.ui.theme.YtBackground
+import com.arms.androidauto.ui.theme.YtDivider
+import com.arms.androidauto.ui.theme.YtRed
+import com.arms.androidauto.ui.theme.YtSurface
+import com.arms.androidauto.ui.theme.YtSurfaceElevated
+import com.arms.androidauto.ui.theme.YtTextPrimary
+import com.arms.androidauto.ui.theme.YtTextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -169,29 +164,41 @@ private fun rememberIgnoringBatteryOptimizations(context: Context): State<Boolea
     return state
 }
 
+// 안내 배너 공통 틀: YouTube Music식 회색 서피스(#212121) + 흰 글자, 오른쪽에 흰색 텍스트 버튼.
 @Composable
-private fun BatteryOptimizationBanner(context: Context) {
+private fun NoticeBanner(
+    message: String,
+    modifier: Modifier = Modifier,
+    trailing: @Composable () -> Unit
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .padding(bottom = 12.dp)
-            .background(RadioOnAirRed.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .padding(bottom = Spacing.md)
+            .background(YtSurface, RoundedCornerShape(Radius.lg))
+            .padding(horizontal = Spacing.lg, vertical = Spacing.sm)
     ) {
         Text(
-            "차량 연결 중 앱이 사라지지 않도록, 배터리 최적화에서 제외해주세요",
+            message,
             style = MaterialTheme.typography.bodySmall,
-            color = Color.White,
+            color = YtTextPrimary,
             modifier = Modifier.weight(1f)
         )
+        trailing()
+    }
+}
+
+@Composable
+private fun BatteryOptimizationBanner(context: Context) {
+    NoticeBanner(message = "차량 연결 중 앱이 사라지지 않도록, 배터리 최적화에서 제외해주세요") {
         TextButton(onClick = {
             val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                 data = Uri.parse("package:${context.packageName}")
             }
             context.startActivity(intent)
         }) {
-            Text("설정", color = RadioNeonCyan, fontWeight = FontWeight.Bold)
+            Text("설정", color = YtAccent, style = MaterialTheme.typography.labelLarge)
         }
     }
 }
@@ -204,44 +211,44 @@ private fun UpdateAvailableBanner(
     isDownloading: Boolean,
     onDownloadClick: () -> Unit
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 12.dp)
-            .background(RadioNeonCyan.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp)
-    ) {
-        Text(
-            "새 버전 ${update.versionName} 사용 가능",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.White,
-            modifier = Modifier.weight(1f)
-        )
+    NoticeBanner(message = "새 버전 ${update.versionName} 사용 가능") {
         if (isDownloading) {
-            CircularProgressIndicator(color = RadioNeonCyan, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            CircularProgressIndicator(color = YtAccent, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
             TextButton(onClick = onDownloadClick) {
-                Text("다운로드", color = RadioNeonCyan, fontWeight = FontWeight.Bold)
+                Text("다운로드", color = YtAccent, style = MaterialTheme.typography.labelLarge)
             }
         }
     }
 }
 
+// 목록 상단의 알약 필터 칩 (YouTube Music식): 기본은 회색 서피스 + 흰 글자, 선택되면 빨강 + 흰 글자.
+// 테두리는 두지 않는다.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun nasFilterChipColors() = FilterChipDefaults.filterChipColors(
-    selectedContainerColor = SpotifyGreen,
-    selectedLabelColor = RadioBgDeep,
-    labelColor = SpotifyTextMuted
-)
+private fun PillFilterChip(selected: Boolean, label: String, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        border = null,
+        label = { Text(label, style = MaterialTheme.typography.labelLarge) },
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = YtSurface,
+            labelColor = YtTextPrimary,
+            selectedContainerColor = YtRed,
+            selectedLabelColor = YtTextPrimary
+        )
+    )
+}
 
 @Composable
 private fun navigationBarItemColors() = NavigationBarItemDefaults.colors(
-    selectedIconColor = SpotifyGreen,
-    selectedTextColor = SpotifyGreen,
-    unselectedIconColor = SpotifyTextMuted,
-    unselectedTextColor = SpotifyTextMuted,
-    // Spotify 하단 탭은 선택 표시용 알약 배경이 없다
+    selectedIconColor = YtTextPrimary,
+    selectedTextColor = YtTextPrimary,
+    unselectedIconColor = YtTextSecondary,
+    unselectedTextColor = YtTextSecondary,
+    // YouTube Music 하단 탭은 선택 표시용 알약 배경이 없다 (선택 = 흰색, 비선택 = 회색)
     indicatorColor = Color.Transparent
 )
 
@@ -717,8 +724,6 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         }
     }
 
-    val backgroundBrush = Brush.verticalGradient(listOf(RadioBgMid, RadioBgDeep))
-
     // 앨범이 수백 개일 수 있어 아티스트별로 묶어 기본은 접어두고, 검색어가 있을 때만
     // 해당하는 아티스트 그룹을 펼친다.
     val albumsByArtist = remember(nasAlbums) {
@@ -827,23 +832,25 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         Scaffold(
             containerColor = Color.Transparent,
             topBar = {
-                // 하단 탭이 이미 목적지를 보여주므로, 상단은 앱 이름 대신 현재 위치를 크게 띄운다.
-                // 그린은 "재생 중/활성" 신호로 아껴두고 제목은 흰색으로 둔다.
+                // 하단 탭이 이미 목적지를 보여주므로, 상단은 앱 이름 대신 현재 위치를 띄운다.
+                // 배경 위에 투명하게 얹고, 제목은 왼쪽 정렬 22sp 굵게, 오른쪽에 톱니바퀴 (YouTube Music식).
                 TopAppBar(
                     title = {
                         Text(
                             text = when (selectedTab) { 0 -> "라디오"; 2 -> "리모컨"; else -> "내 음악" },
                             style = MaterialTheme.typography.headlineLarge,
-                            color = SpotifyTextPrimary
+                            color = YtTextPrimary
                         )
                     },
                     actions = {
+                        // 호스트(홈 플레이어)일 때만 그려진다: "리모컨 대기 중" / "<게스트> 연결됨" + 메뉴(QR, 연결 종료).
+                        HostStatusChip(store = remoteSettingsStore, onOpenPairing = { showRemotePairing = true })
                         Box {
                             IconButton(onClick = { showSettingsMenu = true }) {
                                 Icon(
                                     Icons.Filled.Settings,
                                     contentDescription = "설정",
-                                    tint = SpotifyTextMuted
+                                    tint = YtTextPrimary
                                 )
                             }
                             DropdownMenu(expanded = showSettingsMenu, onDismissRequest = { showSettingsMenu = false }) {
@@ -860,7 +867,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = Color.Transparent,
-                        titleContentColor = SpotifyTextPrimary
+                        titleContentColor = YtTextPrimary
                     )
                 )
             },
@@ -876,7 +883,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                             onNext = { handleNext() }
                         )
                     }
-                    NavigationBar(containerColor = SpotifyBlackElevated) {
+                    // 하단 탭은 배경과 같은 near-black, 위에 1dp 구분선만 (YouTube Music식)
+                    HorizontalDivider(color = YtDivider, thickness = 1.dp)
+                    NavigationBar(containerColor = YtBackground) {
                         NavigationBarItem(
                             selected = selectedTab == 0,
                             onClick = { selectedTab = 0 },
@@ -924,7 +933,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(backgroundBrush)
+                    .background(YtBackground)
                     .padding(paddingValues)
             ) {
             Column(
@@ -956,7 +965,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                 }
                 if (stations.isEmpty()) {
                     Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = SpotifyGreen)
+                        CircularProgressIndicator(color = YtAccent)
                     }
                 } else when (selectedTab) {
                     2 -> RemoteControlScreen(
@@ -1054,13 +1063,13 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                         NowPlayingPane(playback, onCollapse = null)
                     } else {
                         Box(
-                            modifier = Modifier.fillMaxSize().background(SpotifyBlackElevated),
+                            modifier = Modifier.fillMaxSize().background(YtSurface),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 "채널이나 앨범을 선택하면 여기에 재생 정보가 표시됩니다",
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = SpotifyTextMuted
+                                color = YtTextSecondary
                             )
                         }
                     }
@@ -1125,9 +1134,12 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
     }
 
     if (showRemoteSettings) {
+        // 페어링 여부는 다이얼로그가 (다시) 열릴 때와 역할이 바뀔 때마다 다시 읽는다. 예전엔 처음 열릴 때
+        // 한 번만 계산돼서, 페어링이 있는데도 "아직 페어링되지 않음"으로 남는 경우가 있었다.
+        val hasPairing = remember(showRemoteSettings, remoteRole) { remoteSettingsStore.getPairing() != null }
         RemoteSettingsDialog(
             role = remoteRole,
-            hasPairing = remoteSettingsStore.getPairing() != null,
+            hasPairing = hasPairing,
             onRoleChange = { role ->
                 remoteSettingsStore.setRole(role)
                 remoteRole = role
@@ -1140,7 +1152,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
 
     if (showRemotePairing) {
         // 페어링은 전체 화면(QR 표시/스캔). 끝나면 역할을 다시 읽는다 — 게스트 페어링은 화면 안에서 역할까지 정한다.
-        Surface(modifier = Modifier.fillMaxSize(), color = RadioBgDeep) {
+        Surface(modifier = Modifier.fillMaxSize(), color = YtBackground) {
             val onDone = {
                 showRemotePairing = false
                 remoteRole = remoteSettingsStore.getRole()
@@ -1164,7 +1176,20 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
     }
 }
 
-// 라디오 탭: 전체 채널 목록 + 하단 버전/업데이트 정보.
+// 라디오 탭 상단 필터 칩. 화면 표시만 거르는 순수 시각 필터라 재생/이전·다음 순환은 전체 목록 그대로다.
+// 즐겨찾기와 채널 종류(지상파/스트리밍)는 이미 Station에 있는 상태만 쓴다.
+private enum class RadioFilter(val label: String) {
+    ALL("전체"), FAVORITES("즐겨찾기"), RADIO("라디오"), STREAMING("스트리밍");
+
+    fun matches(station: Station): Boolean = when (this) {
+        ALL -> true
+        FAVORITES -> station.isFavorite
+        RADIO -> station.type == StationType.RADIO
+        STREAMING -> station.type == StationType.STREAMING
+    }
+}
+
+// 라디오 탭: 필터 칩 + 채널 목록 + 하단 버전/업데이트 정보.
 @Composable
 private fun RadioTabContent(
     stations: List<Station>,
@@ -1175,17 +1200,48 @@ private fun RadioTabContent(
     lastCheckError: String?,
     onStationClick: (Station) -> Unit
 ) {
+    var filter by remember { mutableStateOf(RadioFilter.ALL) }
+    val visibleStations = remember(stations, filter) { stations.filter(filter::matches) }
+
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(Spacing.xs),
-        contentPadding = PaddingValues(top = Spacing.sm, bottom = Spacing.xl)
+        contentPadding = PaddingValues(bottom = Spacing.xl)
     ) {
-        items(stations, key = { it.id }) { station ->
+        item(key = "filters") {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(bottom = Spacing.sm)
+            ) {
+                RadioFilter.values().forEach { candidate ->
+                    PillFilterChip(
+                        selected = filter == candidate,
+                        label = candidate.label,
+                        onClick = { filter = candidate }
+                    )
+                }
+            }
+        }
+        items(visibleStations, key = { it.id }) { station ->
             ChannelRow(
                 station = station,
                 isSelected = station.id == selectedStationId,
                 isOnAir = station.id == playingStationId,
                 onClick = { onStationClick(station) }
             )
+        }
+        if (visibleStations.isEmpty()) {
+            item(key = "empty") {
+                Text(
+                    if (filter == RadioFilter.FAVORITES) "즐겨찾는 채널이 없어요. 재생 화면의 별을 눌러 추가하세요."
+                    else "해당하는 채널이 없어요",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.xl)
+                )
+            }
         }
         item {
             val lastCheckedText = lastCheckedAtMillis?.let {
@@ -1204,20 +1260,20 @@ private fun RadioTabContent(
                 Text(
                     "Simple Radio v$currentVersionName · made by 1319.space",
                     style = MaterialTheme.typography.labelSmall,
-                    color = SpotifyTextMuted.copy(alpha = 0.5f),
+                    color = YtTextSecondary.copy(alpha = 0.6f),
                     textAlign = TextAlign.Center
                 )
                 Text(
                     lastCheckedText,
                     style = MaterialTheme.typography.labelSmall,
-                    color = SpotifyTextMuted.copy(alpha = 0.35f),
+                    color = YtTextSecondary.copy(alpha = 0.45f),
                     textAlign = TextAlign.Center
                 )
                 checkErrorText?.let {
                     Text(
                         it,
                         style = MaterialTheme.typography.labelSmall,
-                        color = SpotifyTextMuted.copy(alpha = 0.35f),
+                        color = YtTextSecondary.copy(alpha = 0.45f),
                         textAlign = TextAlign.Center
                     )
                 }
@@ -1255,7 +1311,7 @@ private fun NasTabContent(
             Icon(
                 painter = painterResource(R.drawable.ic_library_music),
                 contentDescription = null,
-                tint = SpotifyTextMuted,
+                tint = YtTextSecondary,
                 modifier = Modifier.size(64.dp)
             )
             Spacer(modifier = Modifier.height(Spacing.lg))
@@ -1268,7 +1324,7 @@ private fun NasTabContent(
             Text(
                 "Synology Audio Station의 앨범을\n이 앱에서 바로 재생할 수 있어요",
                 style = MaterialTheme.typography.bodySmall,
-                color = SpotifyTextMuted,
+                color = YtTextSecondary,
                 textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(Spacing.xl))
@@ -1276,8 +1332,8 @@ private fun NasTabContent(
                 onClick = onOpenSettings,
                 shape = RoundedCornerShape(Radius.xxl),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = SpotifyGreen,
-                    contentColor = RadioBgDeep
+                    containerColor = YtAccent,
+                    contentColor = YtBackground
                 )
             ) {
                 Text("NAS 연결", style = MaterialTheme.typography.labelLarge)
@@ -1286,23 +1342,13 @@ private fun NasTabContent(
         return
     }
 
-    // 앨범 / 플레이리스트 전환
+    // 앨범 / 플레이리스트 전환 (알약 필터 칩)
     Row(
         horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-        modifier = Modifier.padding(top = Spacing.sm, bottom = Spacing.xs)
+        modifier = Modifier.padding(bottom = Spacing.sm)
     ) {
-        FilterChip(
-            selected = libraryMode == 0,
-            onClick = { onLibraryModeChange(0) },
-            label = { Text("앨범", style = MaterialTheme.typography.labelLarge) },
-            colors = nasFilterChipColors()
-        )
-        FilterChip(
-            selected = libraryMode == 1,
-            onClick = { onLibraryModeChange(1) },
-            label = { Text("플레이리스트", style = MaterialTheme.typography.labelLarge) },
-            colors = nasFilterChipColors()
-        )
+        PillFilterChip(selected = libraryMode == 0, label = "앨범", onClick = { onLibraryModeChange(0) })
+        PillFilterChip(selected = libraryMode == 1, label = "플레이리스트", onClick = { onLibraryModeChange(1) })
     }
 
     if (libraryMode == 1) {
@@ -1315,27 +1361,30 @@ private fun NasTabContent(
     }
 
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(Spacing.xs),
-        contentPadding = PaddingValues(top = Spacing.sm, bottom = Spacing.xl)
+        contentPadding = PaddingValues(bottom = Spacing.xl)
     ) {
         item {
+            // 검색창: 테두리 없는 회색 알약 (YouTube Music 검색바 느낌)
             OutlinedTextField(
                 value = nasSearchQuery,
                 onValueChange = onSearchChange,
                 placeholder = {
-                    Text("앨범/아티스트 검색", style = MaterialTheme.typography.bodyMedium)
+                    Text("앨범/아티스트 검색", style = MaterialTheme.typography.bodyMedium, color = YtTextSecondary)
                 },
                 leadingIcon = {
-                    Icon(Icons.Filled.Search, contentDescription = null, tint = SpotifyTextMuted)
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = YtTextSecondary)
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(Radius.md),
+                shape = RoundedCornerShape(50),
                 textStyle = MaterialTheme.typography.bodyMedium,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = SpotifyGreen,
-                    unfocusedBorderColor = SpotifyTextMuted.copy(alpha = 0.3f),
-                    focusedTextColor = SpotifyTextPrimary,
-                    unfocusedTextColor = SpotifyTextPrimary
+                    focusedContainerColor = YtSurface,
+                    unfocusedContainerColor = YtSurface,
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent,
+                    cursorColor = YtTextPrimary,
+                    focusedTextColor = YtTextPrimary,
+                    unfocusedTextColor = YtTextPrimary
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1366,8 +1415,6 @@ private fun NasTabContent(
     }
 }
 
-// 스포티파이 스타일 하단 고정 미니플레이어. 라디오/NAS 어느 쪽이 재생 중이든 이 하나로
-// 통일하고, 탭하면 NowPlayingDetailScreen으로 확장된다.
 // 커버 로드가 실패하면 백오프로 다시 시도한다(5s -> 10s -> 20s -> 40s -> 최대 60s 간격, 포기 없음).
 // Coil은 같은 URL로는 다시 요청하지 않으므로, 요청 파라미터에 시도 횟수를 넣어 새 요청으로 만든다.
 // 예전에는 한 번 실패하면 URL이 바뀔 때까지(채널/곡 변경) 회색으로 남았다.
@@ -1429,16 +1476,19 @@ private fun MiniPlayerBar(
             imageUrl = playback.artworkUri
         }
     }
+    // YouTube Music식 전폭 바: 상단 2dp 선(라디오는 빨간 라이브 선, NAS는 회색 구분선), 48dp 커버,
+    // 제목/부제, 오른쪽에 재생·다음.
+    // NAS 진행률 선은 두지 않는다 — 접힌 상태에서는 재생 위치를 폴링하지 않기 때문(전체화면에서만 폴링).
     Surface(
-        color = SpotifySurfaceElevated,
+        color = YtSurface,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(1.dp)
-                    .background(Color.White.copy(alpha = 0.06f))
+                    .height(Sizes.miniPlayerProgress)
+                    .background(if (playback is ActivePlayback.Radio && isPlaying) YtRed else YtDivider)
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1451,7 +1501,7 @@ private fun MiniPlayerBar(
                     modifier = Modifier
                         .size(Sizes.miniPlayerThumbnail)
                         .clip(RoundedCornerShape(Radius.sm))
-                        .background(SpotifyBlackElevated),
+                        .background(YtSurfaceElevated),
                     contentAlignment = Alignment.Center
                 ) {
                     if (imageUrl != null) {
@@ -1464,7 +1514,7 @@ private fun MiniPlayerBar(
                         Icon(
                             painter = painterResource(R.drawable.ic_album),
                             contentDescription = null,
-                            tint = SpotifyTextMuted,
+                            tint = YtTextSecondary,
                             modifier = Modifier.size(Sizes.miniPlayerIcon)
                         )
                     }
@@ -1474,15 +1524,15 @@ private fun MiniPlayerBar(
                     Text(
                         title,
                         style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Medium,
+                        color = YtTextPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         subtitle,
                         style = MaterialTheme.typography.labelMedium,
-                        color = SpotifyTextMuted,
+                        color = YtTextSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -1498,7 +1548,7 @@ private fun MiniPlayerBar(
                             if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play_arrow_filled
                         ),
                         contentDescription = if (isPlaying) "일시정지" else "재생",
-                        tint = SpotifyTextPrimary,
+                        tint = YtTextPrimary,
                         modifier = Modifier.size(Sizes.miniPlayerIcon)
                     )
                 }
@@ -1509,7 +1559,7 @@ private fun MiniPlayerBar(
                     Icon(
                         painter = painterResource(R.drawable.ic_skip_next),
                         contentDescription = "다음",
-                        tint = SpotifyTextPrimary,
+                        tint = YtTextPrimary,
                         modifier = Modifier.size(Sizes.miniPlayerIcon)
                     )
                 }
@@ -1518,7 +1568,9 @@ private fun MiniPlayerBar(
     }
 }
 
-// 전체화면으로 확장된 Now Playing 화면. 라디오는 즐겨찾기/편성 갱신을, NAS는 곡/앨범 정보를 보여준다.
+// 전체화면으로 확장된 Now Playing 화면 (YouTube Music식). 라디오는 즐겨찾기/편성 갱신을, NAS는 곡/앨범 정보를 보여준다.
+// 커버를 크게 블러해서 배경에 깔고(API 31+), 그 위에 12dp 모서리 커버·빨간 ON AIR 태그·흰 제목·
+// 흰 원형 재생 버튼을 올린다.
 @Composable
 private fun NowPlayingDetailScreen(
     playback: ActivePlayback,
@@ -1538,7 +1590,6 @@ private fun NowPlayingDetailScreen(
     onPlayPauseToggle: () -> Unit,
     onNext: () -> Unit
 ) {
-    val backgroundBrush = Brush.verticalGradient(listOf(RadioBgMid, RadioBgDeep))
     val imageUrl = when (playback) {
         is ActivePlayback.Radio -> playback.nowPlaying.imageUrl
         is ActivePlayback.Nas -> playback.artworkUri
@@ -1552,8 +1603,9 @@ private fun NowPlayingDetailScreen(
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(backgroundBrush)
+            .background(YtBackdrop)
     ) {
+    NowPlayingBackdrop(imageUrl)
     val coverSize = minOf(maxWidth * 0.86f, maxHeight * 0.5f)
     Column(
         modifier = Modifier
@@ -1561,30 +1613,20 @@ private fun NowPlayingDetailScreen(
             .padding(horizontal = Spacing.xl)
     ) {
         Spacer(modifier = Modifier.height(Spacing.lg))
+        // 상단 줄: 접기 화살표만 둔다. 즐겨찾기는 제목 아래 보조 동작 줄로 옮겼다.
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(Sizes.playerSecondaryButton),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (onCollapse != null) IconButton(onClick = onCollapse) {
                 Icon(
                     imageVector = Icons.Filled.KeyboardArrowDown,
                     contentDescription = "닫기",
-                    tint = SpotifyTextPrimary,
+                    tint = YtTextPrimary,
                     modifier = Modifier.size(Sizes.playerIcon)
                 )
-            } else Spacer(Modifier.size(48.dp))
-            if (onFavoriteToggle != null) {
-                IconButton(onClick = onFavoriteToggle) {
-                    Icon(
-                        imageVector = Icons.Default.Star,
-                        contentDescription = "즐겨찾기 토글",
-                        tint = if (isFavorite) SpotifyGreen else SpotifyTextMuted,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-            } else {
-                Spacer(modifier = Modifier.size(Sizes.playerSecondaryButton))
             }
         }
 
@@ -1594,8 +1636,8 @@ private fun NowPlayingDetailScreen(
             modifier = Modifier
                 .size(coverSize)
                 .align(Alignment.CenterHorizontally)
-                .clip(RoundedCornerShape(Radius.md))
-                .background(SpotifySurfaceElevated),
+                .clip(RoundedCornerShape(Radius.lg))
+                .background(YtSurfaceElevated),
             contentAlignment = Alignment.Center
         ) {
             if (imageUrl != null) {
@@ -1605,7 +1647,13 @@ private fun NowPlayingDetailScreen(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                EqualizerBars(isAnimating = isPlaying, color = SpotifyGreen, barCount = 5)
+                EqualizerBars(
+                    isAnimating = isPlaying,
+                    color = YtTextSecondary,
+                    barCount = 5,
+                    height = Spacing.huge,
+                    barWidth = 6.dp
+                )
             }
         }
 
@@ -1613,56 +1661,36 @@ private fun NowPlayingDetailScreen(
 
         when (playback) {
             is ActivePlayback.Radio -> {
-                OnAirBadge(isPlaying)
+                OnAirTag(isOnAir = isPlaying)
                 Spacer(modifier = Modifier.height(Spacing.md))
                 Text(
                     text = playback.station.name,
                     style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = YtTextPrimary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(Spacing.sm))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = playback.nowPlaying.programTitle,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = SpotifyTextMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = playback.nowPlaying.currentSong,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = SpotifyTextMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    if (onRefreshMetadata != null) {
-                        IconButton(onClick = onRefreshMetadata, enabled = !isLoadingMetadata) {
-                            if (isLoadingMetadata) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(Sizes.miniPlayerIcon),
-                                    color = SpotifyGreen
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.Refresh,
-                                    contentDescription = "편성 갱신",
-                                    tint = SpotifyTextMuted
-                                )
-                            }
-                        }
-                    }
-                }
+                Spacer(modifier = Modifier.height(Spacing.xs))
+                Text(
+                    text = playback.nowPlaying.programTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = YtTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = playback.nowPlaying.currentSong,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
             is ActivePlayback.Nas -> {
                 Text(
                     text = playback.trackTitle ?: "재생 중",
                     style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = YtTextPrimary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1670,10 +1698,49 @@ private fun NowPlayingDetailScreen(
                 Text(
                     text = playback.source.displaySubtitle(),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = SpotifyTextMuted,
+                    color = YtTextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+        }
+
+        // 보조 동작 줄 (라디오만): 즐겨찾기, 편성 갱신 — 아이콘 버튼으로 나란히
+        if (onFavoriteToggle != null || onRefreshMetadata != null) {
+            Spacer(modifier = Modifier.height(Spacing.sm))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                verticalAlignment = Alignment.CenterVertically,
+                // 아이콘이 제목의 왼쪽 선에 맞도록 IconButton의 내부 여백만큼 당긴다
+                modifier = Modifier.offset(x = -Spacing.md)
+            ) {
+                if (onFavoriteToggle != null) {
+                    IconButton(onClick = onFavoriteToggle) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "즐겨찾기 토글",
+                            tint = if (isFavorite) YtTextPrimary else YtTextSecondary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+                if (onRefreshMetadata != null) {
+                    IconButton(onClick = onRefreshMetadata, enabled = !isLoadingMetadata) {
+                        if (isLoadingMetadata) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(Sizes.miniPlayerIcon),
+                                color = YtTextPrimary,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "편성 갱신",
+                                tint = YtTextSecondary
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -1710,24 +1777,25 @@ private fun NowPlayingDetailScreen(
                 Icon(
                     painter = painterResource(R.drawable.ic_skip_previous),
                     contentDescription = "이전",
-                    tint = SpotifyTextPrimary,
-                    modifier = Modifier.size(Sizes.playerIcon)
+                    tint = YtTextPrimary,
+                    modifier = Modifier.size(Sizes.playerSkipIcon)
                 )
             }
 
+            // 흰 원 안에 검정 아이콘 (YouTube Music)
             IconButton(
                 onClick = onPlayPauseToggle,
                 modifier = Modifier
                     .size(Sizes.playerPrimaryButton)
                     .clip(CircleShape)
-                    .background(SpotifyGreen)
+                    .background(YtAccent)
             ) {
                 Icon(
                     painter = painterResource(
                         if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play_arrow_filled
                     ),
                     contentDescription = if (isPlaying) "일시정지" else "재생",
-                    tint = RadioBgDeep,
+                    tint = YtBackground,
                     modifier = Modifier.size(Sizes.playerIcon)
                 )
             }
@@ -1736,8 +1804,8 @@ private fun NowPlayingDetailScreen(
                 Icon(
                     painter = painterResource(R.drawable.ic_skip_next),
                     contentDescription = "다음",
-                    tint = SpotifyTextPrimary,
-                    modifier = Modifier.size(Sizes.playerIcon)
+                    tint = YtTextPrimary,
+                    modifier = Modifier.size(Sizes.playerSkipIcon)
                 )
             }
 
@@ -1762,7 +1830,34 @@ private fun NowPlayingDetailScreen(
     }
 }
 
-// 셔플/반복처럼 켜짐 상태가 있는 버튼. 켜지면 그린으로 바뀌고 아래에 작은 점이 찍힌다.
+// 재생 화면 배경. API 31+에서는 커버 사본을 크게 블러해 깔고 어두운 스크림을 덮는다.
+// Modifier.blur는 그 아래 API에서 아무 효과가 없으므로(그냥 선명한 커버가 깔린다) 단색 그라데이션으로 대체한다.
+@Composable
+private fun NowPlayingBackdrop(imageUrl: String?) {
+    val canBlur = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(YtSurface, YtBackdrop)))
+    ) {
+        if (canBlur && imageUrl != null) {
+            RetryingAsyncImage(
+                url = imageUrl,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .blur(48.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(YtBackdrop.copy(alpha = 0.65f))
+            )
+        }
+    }
+}
+
+// 셔플/반복처럼 켜짐 상태가 있는 버튼. 켜지면 흰색으로 바뀌고 아래에 작은 점이 찍힌다.
 @Composable
 private fun PlayerToggleButton(
     iconRes: Int,
@@ -1778,8 +1873,8 @@ private fun PlayerToggleButton(
             Icon(
                 painter = painterResource(iconRes),
                 contentDescription = contentDescription,
-                tint = if (isActive) SpotifyGreen else SpotifyTextMuted,
-                modifier = Modifier.size(Sizes.miniPlayerIcon + 2.dp)
+                tint = if (isActive) YtTextPrimary else YtTextSecondary,
+                modifier = Modifier.size(Sizes.miniPlayerIcon)
             )
         }
         if (isActive) {
@@ -1787,7 +1882,7 @@ private fun PlayerToggleButton(
                 modifier = Modifier
                     .size(3.dp)
                     .clip(CircleShape)
-                    .background(SpotifyGreen)
+                    .background(YtTextPrimary)
             )
         }
     }
@@ -1817,9 +1912,9 @@ private fun PlaybackProgressBar(
             },
             enabled = hasDuration,
             colors = SliderDefaults.colors(
-                thumbColor = SpotifyTextPrimary,
-                activeTrackColor = SpotifyTextPrimary,
-                inactiveTrackColor = SpotifyTextMuted.copy(alpha = 0.3f)
+                thumbColor = YtTextPrimary,
+                activeTrackColor = YtTextPrimary,
+                inactiveTrackColor = YtTextSecondary.copy(alpha = 0.3f)
             ),
             // Material 기본 슬라이더는 손잡이가 크고 트랙이 두꺼워 음악 앱에 비해 투박하다.
             // 얇은 트랙 + 작은 원형 손잡이로 바꾼다.
@@ -1828,7 +1923,7 @@ private fun PlaybackProgressBar(
                     modifier = Modifier
                         .size(Spacing.md)
                         .clip(CircleShape)
-                        .background(SpotifyTextPrimary)
+                        .background(YtTextPrimary)
                 )
             },
             track = { sliderState ->
@@ -1838,8 +1933,8 @@ private fun PlaybackProgressBar(
                     thumbTrackGapSize = 0.dp,
                     drawStopIndicator = null,
                     colors = SliderDefaults.colors(
-                        activeTrackColor = SpotifyTextPrimary,
-                        inactiveTrackColor = SpotifyTextMuted.copy(alpha = 0.3f)
+                        activeTrackColor = YtTextPrimary,
+                        inactiveTrackColor = YtTextSecondary.copy(alpha = 0.3f)
                     )
                 )
             },
@@ -1852,12 +1947,12 @@ private fun PlaybackProgressBar(
             Text(
                 text = formatClock(shownMs),
                 style = MaterialTheme.typography.labelMedium,
-                color = SpotifyTextMuted
+                color = YtTextSecondary
             )
             Text(
                 text = if (hasDuration) formatClock(durationMs) else "--:--",
                 style = MaterialTheme.typography.labelMedium,
-                color = SpotifyTextMuted
+                color = YtTextSecondary
             )
         }
     }
@@ -1870,64 +1965,8 @@ private fun formatClock(ms: Long): String {
     return "%d:%02d".format(minutes, seconds)
 }
 
-@Composable
-private fun OnAirBadge(isOnAir: Boolean) {
-    val color = if (isOnAir) RadioOnAirRed else Color.Gray
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.15f))
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(Spacing.sm)
-                .clip(CircleShape)
-                .background(color)
-        )
-        Spacer(modifier = Modifier.width(Spacing.xs + 2.dp))
-        Text(
-            text = if (isOnAir) "ON AIR" else "STANDBY",
-            style = MaterialTheme.typography.labelSmall,
-            color = color
-        )
-    }
-}
-
-@Composable
-private fun EqualizerBars(isAnimating: Boolean, color: Color, barCount: Int = 4) {
-    val infiniteTransition = rememberInfiniteTransition(label = "equalizer")
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.Bottom,
-        modifier = Modifier.height(28.dp)
-    ) {
-        repeat(barCount) { index ->
-            val heightFraction by if (isAnimating) {
-                infiniteTransition.animateFloat(
-                    initialValue = 0.25f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(durationMillis = 420 + index * 130, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "bar$index"
-                )
-            } else {
-                remember { mutableStateOf(0.2f) }
-            }
-            Box(
-                modifier = Modifier
-                    .width(5.dp)
-                    .fillMaxHeight(heightFraction)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(color)
-            )
-        }
-    }
-}
-
+// 채널 행 (YouTube Music식): 56dp 둥근 아이콘 타일 + 제목/부제, 오른쪽에 즐겨찾기 별.
+// 카드 배경 없음. 재생 중인 행은 부제 자리에 빨간 ON AIR 태그, 오른쪽 끝에 빨간 이퀄라이저.
 @Composable
 private fun ChannelRow(
     station: Station,
@@ -1940,14 +1979,14 @@ private fun ChannelRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
-            .padding(horizontal = Spacing.sm, vertical = Spacing.sm),
+            .padding(vertical = Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
                 .size(Sizes.listThumbnail)
-                .clip(RoundedCornerShape(Radius.sm))
-                .background(SpotifySurfaceElevated),
+                .clip(RoundedCornerShape(Radius.md))
+                .background(YtSurfaceElevated),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -1955,42 +1994,48 @@ private fun ChannelRow(
                     if (station.type == StationType.STREAMING) R.drawable.ic_album else R.drawable.ic_radio
                 ),
                 contentDescription = null,
-                tint = if (isOnAir) SpotifyGreen else SpotifyTextMuted,
+                tint = if (isOnAir) YtTextPrimary else YtTextSecondary,
                 modifier = Modifier.size(Sizes.miniPlayerIcon + 2.dp)
             )
         }
 
-        Spacer(modifier = Modifier.width(Spacing.md))
+        Spacer(modifier = Modifier.width(Spacing.lg))
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = station.name,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (isOnAir) SpotifyGreen else MaterialTheme.colorScheme.onSurface,
+                color = YtTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Text(
-                text = channelSubtitle(station),
-                style = MaterialTheme.typography.bodySmall,
-                color = SpotifyTextMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        if (station.isFavorite) {
-            Icon(
-                imageVector = Icons.Default.Star,
-                contentDescription = "즐겨찾는 채널",
-                tint = SpotifyGreen,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(Spacing.sm))
+            Spacer(modifier = Modifier.height(Spacing.xxs))
+            if (isOnAir) {
+                OnAirTag(isOnAir = true, compact = true)
+            } else {
+                Text(
+                    text = channelSubtitle(station),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         if (isOnAir) {
-            EqualizerBars(isAnimating = true, color = SpotifyGreen, barCount = 3)
+            Spacer(modifier = Modifier.width(Spacing.sm))
+            EqualizerBars(isAnimating = true)
+        }
+
+        if (station.isFavorite) {
+            Spacer(modifier = Modifier.width(Spacing.md))
+            Icon(
+                imageVector = Icons.Default.Star,
+                contentDescription = "즐겨찾는 채널",
+                tint = YtTextPrimary,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }
@@ -2007,43 +2052,45 @@ private fun NasAlbumRow(album: NasAlbum, isPlaying: Boolean, onClick: () -> Unit
             .fillMaxWidth()
             .clip(RoundedCornerShape(Radius.md))
             .clickable { onClick() }
-            .padding(horizontal = Spacing.sm, vertical = Spacing.sm)
+            .padding(vertical = Spacing.sm)
     ) {
         // 아티스트 그룹 안에 속한 항목이라는 걸 들여쓰기로 표현한다
         Spacer(modifier = Modifier.width(Spacing.md))
         Box(
             modifier = Modifier
-                .size(Sizes.listThumbnail - 8.dp)
-                .clip(RoundedCornerShape(Radius.sm))
-                .background(SpotifySurfaceElevated),
+                .size(Sizes.listThumbnail)
+                .clip(RoundedCornerShape(Radius.md))
+                .background(YtSurfaceElevated),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 painter = painterResource(R.drawable.ic_album),
                 contentDescription = null,
-                tint = if (isPlaying) SpotifyGreen else SpotifyTextMuted,
+                tint = YtTextSecondary,
                 modifier = Modifier.size(Sizes.miniPlayerIcon)
             )
         }
-        Spacer(modifier = Modifier.width(Spacing.md))
+        Spacer(modifier = Modifier.width(Spacing.lg))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 album.name,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (isPlaying) SpotifyGreen else MaterialTheme.colorScheme.onSurface,
+                color = YtTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 "${album.songCount}곡",
                 style = MaterialTheme.typography.bodySmall,
-                color = SpotifyTextMuted,
+                color = YtTextSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
+        // 재생 중인 앨범은 오른쪽 끝에 빨간 이퀄라이저
         if (isPlaying) {
-            EqualizerBars(isAnimating = true, color = SpotifyGreen, barCount = 3)
+            Spacer(modifier = Modifier.width(Spacing.sm))
+            EqualizerBars(isAnimating = true)
         }
     }
 }
@@ -2056,7 +2103,7 @@ private fun NasArtistHeaderRow(
     isExpanded: Boolean,
     onClick: () -> Unit
 ) {
-    // 배경 블록 대신 여백과 얇은 구분선으로 그룹을 나눈다 (Spotify식).
+    // 배경 블록 대신 여백과 얇은 구분선(#3F3F3F)으로 그룹을 나눈다 (YouTube Music식).
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -2064,35 +2111,32 @@ private fun NasArtistHeaderRow(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Radius.md))
                 .clickable { onClick() }
-                .padding(horizontal = Spacing.sm, vertical = Spacing.md)
+                .padding(vertical = Spacing.md)
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     artistName,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = YtTextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     "${albumCount}개 앨범",
                     style = MaterialTheme.typography.labelMedium,
-                    color = SpotifyTextMuted
+                    color = YtTextSecondary
                 )
             }
             Icon(
                 imageVector = Icons.Filled.KeyboardArrowDown,
                 contentDescription = if (isExpanded) "접기" else "펼치기",
-                tint = SpotifyTextMuted,
+                tint = YtTextSecondary,
                 modifier = Modifier.graphicsLayer { rotationZ = if (isExpanded) 180f else 0f }
             )
         }
         if (!isExpanded) {
-            HorizontalDivider(
-                color = Color.White.copy(alpha = 0.06f),
-                modifier = Modifier.padding(horizontal = Spacing.sm)
-            )
+            HorizontalDivider(color = YtDivider, thickness = 1.dp)
         }
     }
 }
@@ -2133,7 +2177,7 @@ private fun RemoteSettingsDialog(
                     Text(
                         if (hasPairing) "페어링됨" else "아직 페어링되지 않음",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (hasPairing) SpotifyGreen else SpotifyTextMuted
+                        color = if (hasPairing) YtTextPrimary else YtTextSecondary
                     )
                 }
             }
@@ -2193,12 +2237,12 @@ private fun NasSettingsDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 if (isTesting) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = RadioNeonCyan)
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = YtAccent, strokeWidth = 2.dp)
                 }
                 testResult?.let { success ->
                     Text(
                         if (success) "연결 성공" else "연결 실패 - 주소/계정/비밀번호를 확인해주세요",
-                        color = if (success) RadioNeonCyan else RadioOnAirRed,
+                        color = if (success) YtTextPrimary else YtRed,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }

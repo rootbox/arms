@@ -1,5 +1,6 @@
 package com.arms.androidauto.core.remote
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -7,14 +8,21 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
 
 // 실제 브로커를 상대로 한 통합 테스트용 CLI. 앱 코드 없이 호스트/게스트를 흉내낸다.
 //   ./gradlew :core:remote:cli --args="gen --broker wss://host/mqtt --user u --pass p"
-//   ./gradlew :core:remote:cli --args="host --pairing SR1...."
-//   ./gradlew :core:remote:cli --args="guest --pairing SR1.... [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|select:<mediaId>|volume:<0..100>]"
+//   ./gradlew :core:remote:cli --args="host --pairing SR1.... [--revoke-after <sec>]"
+//   ./gradlew :core:remote:cli --args="guest --pairing SR1.... [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|hello|bye|select:<mediaId>|volume:<0..100>]"
+// 게스트는 구독 직후 Hello("cli-guest")를, 종료 직전 Bye를 보낸다. 호스트는 Hello로 게스트 목록을 관리한다(3분 만료).
 // 사용자가 넘긴 값(페어링 텍스트 등) 외의 비밀은 출력하지 않는다.
+private const val CLI_GUEST_NAME = "cli-guest"
+private const val GUEST_EXPIRY_MS = 3 * 60_000L
+private const val HOST_PERIOD_MS = 10_000L
+private const val GUEST_LISTEN_MS = 15_000L
+
 fun main(args: Array<String>) {
     if (args.isEmpty()) usage()
     val mode = args[0]
@@ -32,8 +40,8 @@ private fun usage(): Nothing {
         """
         usage:
           gen   --broker <url> --user <u> --pass <p>
-          host  --pairing <qrtext>
-          guest --pairing <qrtext> [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|select:<mediaId>|volume:<0..100>]
+          host  --pairing <qrtext> [--revoke-after <sec>]
+          guest --pairing <qrtext> [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|hello|bye|select:<mediaId>|volume:<0..100>]
         """.trimIndent(),
     )
     exitProcess(2)
@@ -81,6 +89,8 @@ private fun parseCommand(text: String): RemoteCommand? = when {
     text == "prev" -> RemoteCommand.Previous
     text == "refresh" -> RemoteCommand.Refresh
     text == "bt_reconnect" -> RemoteCommand.BtReconnect
+    text == "hello" -> RemoteCommand.Hello(CLI_GUEST_NAME)
+    text == "bye" -> RemoteCommand.Bye
     text.startsWith("select:") -> text.removePrefix("select:").takeIf { it.isNotBlank() }?.let { RemoteCommand.Select(it) }
     text.startsWith("volume:") -> text.removePrefix("volume:").toIntOrNull()?.takeIf { it in 0..100 }?.let { RemoteCommand.Volume(it) }
     else -> null
@@ -106,18 +116,50 @@ private fun fakeItems() = listOf(
     RemoteItem("station:3", "Fake FM 3", "classic"),
 )
 
+// 호스트 시뮬레이터의 게스트 목록. 명령 수집 코루틴과 주기 루프가 다른 스레드에서 만지므로 잠근다.
+private class GuestBook {
+    private val lastSeen = LinkedHashMap<String, Long>()
+
+    fun hello(name: String, nowMs: Long): Boolean = synchronized(this) {
+        val isNew = name !in lastSeen
+        lastSeen[name] = nowMs
+        isNew
+    }
+
+    fun bye(name: String): Boolean = synchronized(this) { lastSeen.remove(name) != null }
+
+    fun expire(nowMs: Long): Boolean = synchronized(this) {
+        lastSeen.entries.removeIf { nowMs - it.value > GUEST_EXPIRY_MS }
+    }
+
+    fun snapshot(): List<RemoteGuest> = synchronized(this) {
+        lastSeen.map { (name, seen) -> RemoteGuest(name = name, lastSeenMs = seen) }
+    }
+
+    fun describe(nowMs: Long): String = snapshot().joinToString(prefix = "[", postfix = "]") { g ->
+        "${g.name}(${(nowMs - g.lastSeenMs) / 1000}s ago)"
+    }
+}
+
 private fun runHost(opts: Map<String, String>) {
     val pairing = loadPairing(opts)
+    val revokeAfterMs: Long? = opts["revoke-after"]?.let { text ->
+        text.toLongOrNull()?.takeIf { it >= 0 }?.times(1000) ?: run {
+            System.err.println("invalid --revoke-after: $text")
+            usage()
+        }
+    }
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val transport = MqttRemoteTransport(pairing.brokerUrl, pairing.username, pairing.password, "sr-cli-host-${pairing.pairId}")
     val channel = RemoteChannel(pairing, transport, scope)
     val items = fakeItems()
+    val guests = GuestBook()
     var index = 0
     var playing = false
     var volume = 50
     var btConnected = true
 
-    fun currentState() = HostState(
+    fun currentState(revoked: Boolean = false) = HostState(
         mediaId = items[index].mediaId,
         title = items[index].name,
         artist = items[index].subtitle,
@@ -128,20 +170,27 @@ private fun runHost(opts: Map<String, String>) {
         batteryPercent = 100,
         updatedAtMs = System.currentTimeMillis(),
         items = items,
+        volumePercent = volume,
+        guests = guests.snapshot(),
+        revoked = revoked,
     )
+
+    fun printGuests() = println("host: guests=${guests.describe(System.currentTimeMillis())}")
 
     val stopping = AtomicBoolean(false)
     Runtime.getRuntime().addShutdownHook(
         Thread {
-            stopping.set(true)
-            runBlocking { runCatching { channel.stop() } }
+            if (stopping.compareAndSet(false, true)) runBlocking { runCatching { channel.stop() } }
         },
     )
 
     runBlocking {
         println("host: connecting to ${pairing.brokerUrl} (pairId ${pairing.pairId})")
         channel.start(asHost = true)
-        println("host: connected, waiting for commands (Ctrl-C to quit)")
+        println(
+            "host: connected, waiting for commands (Ctrl-C to quit)" +
+                (revokeAfterMs?.let { ", revoking in ${it / 1000} s" } ?: ""),
+        )
         scope.launch {
             channel.connectionState.collect { println("host: connection $it") }
         }
@@ -153,12 +202,16 @@ private fun runHost(opts: Map<String, String>) {
                 println("host: command seq=${msg.seq} ${describe(msg.command)}")
                 var ok = true
                 var note: String? = null
+                var guestsChanged = false
                 when (val c = msg.command) {
                     RemoteCommand.Play -> playing = true
                     RemoteCommand.Pause, RemoteCommand.Stop -> playing = false
                     RemoteCommand.Next -> index = (index + 1) % items.size
                     RemoteCommand.Previous -> index = (index + items.size - 1) % items.size
-                    RemoteCommand.Refresh, RemoteCommand.Bye, is RemoteCommand.Hello -> Unit
+                    RemoteCommand.Refresh -> Unit
+                    is RemoteCommand.Hello -> guestsChanged = guests.hello(c.guestName, System.currentTimeMillis())
+                    // Bye에는 이름이 없다(계약). CLI 호스트는 게스트가 하나뿐이라고 보고 cli-guest를 지운다.
+                    RemoteCommand.Bye -> guestsChanged = guests.bye(CLI_GUEST_NAME)
                     RemoteCommand.BtReconnect -> btConnected = true
                     is RemoteCommand.Select -> {
                         val i = items.indexOfFirst { it.mediaId == c.mediaId }
@@ -166,18 +219,33 @@ private fun runHost(opts: Map<String, String>) {
                     }
                     is RemoteCommand.Volume -> volume = c.percent
                 }
+                if (guestsChanged) printGuests()
                 channel.sendAck(msg.seq, ok, note)
                 channel.publishState(currentState())
                 println("host: acked seq=${msg.seq} ok=$ok, state published (volume=$volume)")
             }
         }
+        val startedAt = System.currentTimeMillis()
         while (!stopping.get()) {
+            val now = System.currentTimeMillis()
+            if (guests.expire(now)) {
+                print("host: guest expired -> ")
+                printGuests()
+            }
+            if (revokeAfterMs != null && now - startedAt >= revokeAfterMs) {
+                channel.publishState(currentState(revoked = true))
+                println("host: revoked state published, exiting")
+                break
+            }
             channel.publishState(currentState())
-            println("host: periodic state published (${items[index].name}, playing=$playing)")
-            delay(10_000)
+            println("host: periodic state published (${items[index].name}, playing=$playing, volume=$volume, guests=${guests.snapshot().size})")
+            val wait = revokeAfterMs?.let { (startedAt + it - System.currentTimeMillis()).coerceIn(0, HOST_PERIOD_MS) } ?: HOST_PERIOD_MS
+            delay(wait)
         }
+        if (stopping.compareAndSet(false, true)) channel.stop()
     }
     scope.cancel()
+    exitProcess(0)
 }
 
 private fun runGuest(opts: Map<String, String>) {
@@ -191,11 +259,12 @@ private fun runGuest(opts: Map<String, String>) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val transport = MqttRemoteTransport(pairing.brokerUrl, pairing.username, pairing.password, "sr-cli-guest-${pairing.pairId}")
     val channel = RemoteChannel(pairing, transport, scope)
+    val revoked = CompletableDeferred<Unit>()
 
     runBlocking {
         println("guest: connecting to ${pairing.brokerUrl} (pairId ${pairing.pairId})")
         channel.start(asHost = false)
-        println("guest: connected, listening for 15 s")
+        println("guest: connected, listening for ${GUEST_LISTEN_MS / 1000} s")
         scope.launch {
             channel.connectionState.collect { println("guest: connection $it") }
         }
@@ -207,19 +276,32 @@ private fun runGuest(opts: Map<String, String>) {
                 println(
                     "guest: state title=${s.title} artist=${s.artist} playing=${s.isPlaying} " +
                         "pb=${s.playbackState} bt=${s.bluetooth?.connected}/${s.bluetooth?.deviceName} " +
-                        "battery=${s.batteryPercent} items=${s.items.size} updatedAt=${s.updatedAtMs}",
+                        "battery=${s.batteryPercent} volume=${s.volumePercent} items=${s.items.size} " +
+                        "guests=${s.guests.map { it.name }} revoked=${s.revoked} updatedAt=${s.updatedAtMs}",
                 )
+                if (s.revoked) revoked.complete(Unit)
             }
         }
         scope.launch {
             channel.acks.collect { a -> println("guest: ack for seq=${a.ackSeq} ok=${a.ok} message=${a.message}") }
         }
+        // 구독 직후 인사. 실제 앱도 리모컨 화면을 열 때 이렇게 한다.
+        val helloSeq = channel.sendCommand(RemoteCommand.Hello(CLI_GUEST_NAME))
+        println("guest: sent hello:$CLI_GUEST_NAME seq=$helloSeq")
         if (command != null) {
             delay(500)
             val seq = channel.sendCommand(command)
             println("guest: sent ${describe(command)} seq=$seq")
         }
-        delay(15_000)
+        val wasRevoked = withTimeoutOrNull(GUEST_LISTEN_MS) { revoked.await() } != null
+        if (wasRevoked) {
+            // 실제 앱은 여기서 페어링을 지우고 안내한다. 끊긴 상대에게 Bye는 보내지 않는다.
+            println("guest: host revoked this pairing -> would clear pairing and exit")
+        } else if (command != RemoteCommand.Bye) {
+            val byeSeq = channel.sendCommand(RemoteCommand.Bye)
+            println("guest: sent bye seq=$byeSeq")
+            delay(300)
+        }
         channel.stop()
         println("guest: done")
     }

@@ -39,13 +39,14 @@ import androidx.compose.ui.unit.dp
 import com.arms.androidauto.R
 import com.arms.androidauto.core.model.NasAlbum
 import com.arms.androidauto.core.model.NasSong
-import com.arms.androidauto.ui.theme.RadioBgDeep
+import com.arms.androidauto.ui.components.EqualizerBars
 import com.arms.androidauto.ui.theme.Radius
 import com.arms.androidauto.ui.theme.Sizes
 import com.arms.androidauto.ui.theme.Spacing
-import com.arms.androidauto.ui.theme.SpotifyGreen
-import com.arms.androidauto.ui.theme.SpotifySurfaceElevated
-import com.arms.androidauto.ui.theme.SpotifyTextMuted
+import com.arms.androidauto.ui.theme.YtAccent
+import com.arms.androidauto.ui.theme.YtBackground
+import com.arms.androidauto.ui.theme.YtSurfaceElevated
+import com.arms.androidauto.ui.theme.YtTextSecondary
 
 // 앨범 안의 곡 목록. 앨범을 눌렀을 때 바로 재생하는 대신 이 화면으로 들어와서,
 // 전체 재생 / 특정 곡부터 재생 / 곡을 플레이리스트에 담기를 고를 수 있게 한다.
@@ -91,14 +92,14 @@ fun NasAlbumDetailScreen(
                         Box(
                             modifier = Modifier
                                 .size(96.dp)
-                                .clip(RoundedCornerShape(Radius.md))
-                                .background(SpotifySurfaceElevated),
+                                .clip(RoundedCornerShape(Radius.lg))
+                                .background(YtSurfaceElevated),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_album),
                                 contentDescription = null,
-                                tint = SpotifyTextMuted,
+                                tint = YtTextSecondary,
                                 modifier = Modifier.size(40.dp)
                             )
                         }
@@ -115,7 +116,7 @@ fun NasAlbumDetailScreen(
                             Text(
                                 text = "${album.albumArtist.ifBlank { "알 수 없는 아티스트" }} · ${album.songCount}곡",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = SpotifyTextMuted,
+                                color = YtTextSecondary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -129,9 +130,10 @@ fun NasAlbumDetailScreen(
                             onClick = onPlayAll,
                             enabled = songs.isNotEmpty(),
                             shape = RoundedCornerShape(Radius.xxl),
+                            // YouTube Music식 흰 알약 버튼 + 검정 글자
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = SpotifyGreen,
-                                contentColor = RadioBgDeep
+                                containerColor = YtAccent,
+                                contentColor = YtBackground
                             )
                         ) {
                             Icon(
@@ -147,7 +149,7 @@ fun NasAlbumDetailScreen(
                             Text(
                                 "전체 담기",
                                 style = MaterialTheme.typography.labelLarge,
-                                color = SpotifyTextMuted
+                                color = YtTextSecondary
                             )
                         }
                     }
@@ -162,7 +164,7 @@ fun NasAlbumDetailScreen(
                             .padding(Spacing.xl),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(color = SpotifyGreen)
+                        CircularProgressIndicator(color = YtAccent)
                     }
                 }
             }
@@ -185,6 +187,7 @@ fun NasAlbumDetailScreen(
 }
 
 // 앨범 상세와 플레이리스트 상세가 함께 쓰는 곡 행.
+// 재생 중인 곡은 글자색을 바꾸지 않고, 트랙 번호 자리에 빨간 이퀄라이저를 띄운다 (YouTube Music식).
 @Composable
 fun NasSongRow(
     trackNumber: Int,
@@ -208,18 +211,22 @@ fun NasSongRow(
             modifier = Modifier.width(28.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = trackNumber.toString(),
-                style = MaterialTheme.typography.bodySmall,
-                color = if (isPlaying) SpotifyGreen else SpotifyTextMuted
-            )
+            if (isPlaying) {
+                EqualizerBars(isAnimating = true)
+            } else {
+                Text(
+                    text = trackNumber.toString(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtTextSecondary
+                )
+            }
         }
         Spacer(modifier = Modifier.width(Spacing.sm))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (isPlaying) SpotifyGreen else MaterialTheme.colorScheme.onSurface,
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -227,7 +234,7 @@ fun NasSongRow(
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = SpotifyTextMuted,
+                    color = YtTextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -237,7 +244,7 @@ fun NasSongRow(
             Icon(
                 imageVector = trailingIcon,
                 contentDescription = trailingDescription,
-                tint = SpotifyTextMuted
+                tint = YtTextSecondary
             )
         }
     }

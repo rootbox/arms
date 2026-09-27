@@ -6,42 +6,40 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// Spotify 톤의 타입 스케일.
-// 커스텀 폰트는 넣지 않는다(APK 크기 방침). 대신 큰 제목에 무거운 굵기와 음수 자간을 주고,
-// 본문은 굵기를 낮춰 대비를 만드는 방식으로 분위기를 낸다.
+// YouTube Music 톤의 타입 스케일. 폰트는 시스템 기본(Roboto)을 그대로 쓴다(APK 크기 방침).
+// YT Music은 Spotify보다 굵기가 한 단계 가볍다: 큰 제목은 Bold, 목록 제목은 Medium, 부제는 Normal.
 //
 // 화면 코드에서 fontSize/fontWeight를 직접 쓰지 말고 여기 정의된 스타일을 쓴다.
-// (예전에는 같은 역할의 텍스트가 화면마다 11~26sp로 제각각이었다)
 val Typography = Typography(
     displaySmall = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Black,
+        fontWeight = FontWeight.Bold,
         fontSize = 34.sp,
         lineHeight = 40.sp,
-        letterSpacing = (-1).sp
+        letterSpacing = (-0.5).sp
     ),
-    // 상단바 제목
+    // 상단바 제목 (22sp, 왼쪽 정렬)
     headlineLarge = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Black,
-        fontSize = 28.sp,
-        lineHeight = 34.sp,
-        letterSpacing = (-0.5).sp
+        fontWeight = FontWeight.Bold,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        letterSpacing = 0.sp
     ),
-    // 전체화면 플레이어의 곡/채널명
+    // 큰 섹션 제목 / 전체화면 플레이어의 곡·채널명 (24sp)
     headlineMedium = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Black,
+        fontWeight = FontWeight.Bold,
         fontSize = 24.sp,
         lineHeight = 30.sp,
-        letterSpacing = (-0.5).sp
+        letterSpacing = 0.sp
     ),
     headlineSmall = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Bold,
         fontSize = 20.sp,
         lineHeight = 26.sp,
-        letterSpacing = (-0.25).sp
+        letterSpacing = 0.sp
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.Default,
@@ -49,16 +47,16 @@ val Typography = Typography(
         fontSize = 18.sp,
         lineHeight = 24.sp
     ),
-    // 목록 행의 첫 줄 (채널명/앨범명)
+    // 목록 행의 첫 줄 (채널명/앨범명) 16sp Medium
     titleMedium = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Medium,
         fontSize = 16.sp,
         lineHeight = 22.sp
     ),
     titleSmall = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Bold,
+        fontWeight = FontWeight.Medium,
         fontSize = 15.sp,
         lineHeight = 20.sp
     ),
@@ -75,16 +73,16 @@ val Typography = Typography(
         fontSize = 14.sp,
         lineHeight = 20.sp
     ),
-    // 목록 행의 둘째 줄
+    // 목록 행의 둘째 줄 (부제 14sp, 색은 YtTextSecondary)
     bodySmall = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Normal,
-        fontSize = 13.sp,
+        fontSize = 14.sp,
         lineHeight = 18.sp
     ),
     labelLarge = TextStyle(
         fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Bold,
+        fontWeight = FontWeight.Medium,
         fontSize = 14.sp,
         lineHeight = 18.sp
     ),
@@ -96,7 +94,7 @@ val Typography = Typography(
         lineHeight = 16.sp,
         letterSpacing = 0.2.sp
     ),
-    // ON AIR 배지, 하단 푸터
+    // ON AIR 태그, 하단 푸터
     labelSmall = TextStyle(
         fontFamily = FontFamily.Default,
         fontWeight = FontWeight.Bold,

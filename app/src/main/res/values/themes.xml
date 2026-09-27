@@ -1,8 +1,11 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
-    <style name="Theme.ARMSAndroidAuto" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+    <!-- Base application theme. 앱은 항상 다크(YouTube Music 스타일)라 창 배경과 시스템 바를
+         Compose 테마의 배경색(#0F0F0F)에 맞춘다. 첫 프레임의 흰 번쩍임과 밝은 상태바를 막는다. -->
+    <style name="Theme.ARMSAndroidAuto" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/yt_background</item>
+        <item name="android:statusBarColor">@color/yt_background</item>
+        <item name="android:navigationBarColor">@color/yt_background</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 
     <style name="Theme.ARMSAndroidAuto.NoActionBar">

@@ -5,6 +5,7 @@ import com.arms.androidauto.core.model.Station
 import com.arms.androidauto.core.model.StationType
 import com.arms.androidauto.core.remote.BluetoothStatus
 import com.arms.androidauto.core.remote.HostState
+import com.arms.androidauto.core.remote.RemoteGuest
 import com.arms.androidauto.core.remote.RemoteItem
 
 // 세션(MediaController)에서 읽은 값 중 게스트 상태를 만드는 데 필요한 것만 담는 스냅샷.
@@ -81,6 +82,12 @@ object HostStateBuilder {
         bluetooth: BluetoothStatus?,
         batteryPercent: Int?,
         nowMs: Long,
+        // 미디어 볼륨(0..100). 모르면 null.
+        volumePercent: Int? = null,
+        // 지금 붙어 있는 게스트(이름·마지막 인사 시각). 호스트 상단바·QR 화면 자동 닫힘용.
+        guests: List<RemoteGuest> = emptyList(),
+        // "연결 종료" 알림. 게스트는 이걸 받으면 페어링을 지운다.
+        revoked: Boolean = false,
     ): HostState = HostState(
         mediaId = snapshot.mediaId,
         title = snapshot.title,
@@ -92,5 +99,8 @@ object HostStateBuilder {
         batteryPercent = batteryPercent?.coerceIn(0, 100),
         updatedAtMs = nowMs,
         items = items(stations, snapshot),
+        volumePercent = volumePercent?.coerceIn(0, 100),
+        guests = guests,
+        revoked = revoked,
     )
 }

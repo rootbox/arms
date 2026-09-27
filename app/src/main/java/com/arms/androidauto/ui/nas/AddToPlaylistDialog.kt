@@ -32,8 +32,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.arms.androidauto.core.model.NasPlaylist
 import com.arms.androidauto.ui.theme.Spacing
-import com.arms.androidauto.ui.theme.SpotifyGreen
-import com.arms.androidauto.ui.theme.SpotifyTextMuted
+import com.arms.androidauto.ui.theme.YtAccent
+import com.arms.androidauto.ui.theme.YtTextSecondary
 
 // 곡을 어느 플레이리스트에 담을지 고르는 다이얼로그.
 // 목록에서 고르거나, 그 자리에서 새로 만들어 바로 담을 수 있다.
@@ -63,7 +63,7 @@ fun AddToPlaylistDialog(
                     Text(
                         text = "${songCount}곡을 담을 플레이리스트 이름을 정해주세요",
                         style = MaterialTheme.typography.bodySmall,
-                        color = SpotifyTextMuted
+                        color = YtTextSecondary
                     )
                     Spacer(modifier = Modifier.padding(top = Spacing.sm))
                     OutlinedTextField(
@@ -73,8 +73,8 @@ fun AddToPlaylistDialog(
                         singleLine = true,
                         textStyle = MaterialTheme.typography.bodyMedium,
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = SpotifyGreen,
-                            unfocusedBorderColor = SpotifyTextMuted.copy(alpha = 0.3f)
+                            focusedBorderColor = YtAccent,
+                            unfocusedBorderColor = YtTextSecondary.copy(alpha = 0.3f)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -95,14 +95,14 @@ fun AddToPlaylistDialog(
                             Icon(
                                 imageVector = Icons.Filled.Add,
                                 contentDescription = null,
-                                tint = SpotifyGreen,
+                                tint = YtAccent,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(Spacing.md))
                             Text(
                                 "새 플레이리스트 만들기",
                                 style = MaterialTheme.typography.titleMedium,
-                                color = SpotifyGreen
+                                color = YtAccent
                             )
                         }
                     }
@@ -123,7 +123,7 @@ fun AddToPlaylistDialog(
                             Text(
                                 "${playlist.songCount}곡",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = SpotifyTextMuted
+                                color = YtTextSecondary
                             )
                         }
                     }

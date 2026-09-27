@@ -21,6 +21,9 @@ class JsonRemoteCodecTest {
         RemoteCommand.Select("station:4"),
         RemoteCommand.Volume(0),
         RemoteCommand.Volume(100),
+        RemoteCommand.Hello("Galaxy S25"),
+        RemoteCommand.Hello("a".repeat(40)),
+        RemoteCommand.Bye,
     )
 
     private val fullState = HostState(
@@ -162,5 +165,137 @@ class JsonRemoteCodecTest {
         assertNull(codec.decode("not json"))
         assertNull(codec.decode("[1,2,3]"))
         assertNull(codec.decode("{}"))
+    }
+
+    // ---- Hello/Bye · volumePercent/guests/revoked ----
+
+    private val presenceState = fullState.copy(
+        volumePercent = 35,
+        guests = listOf(
+            RemoteGuest("Galaxy S25", 1_700_000_002_000L),
+            RemoteGuest("cli-guest", 1_700_000_003_000L),
+        ),
+        revoked = true,
+    )
+
+    @Test
+    fun `hello and bye round trip`() {
+        val hello = RemoteMessage.Command(seq = 11, sentAtMs = 12, command = RemoteCommand.Hello("Galaxy S25"))
+        val bye = RemoteMessage.Command(seq = 13, sentAtMs = 14, command = RemoteCommand.Bye)
+        assertEquals(hello, codec.decode(codec.encode(hello)))
+        assertEquals(bye, codec.decode(codec.encode(bye)))
+        val helloJson = JSONObject(codec.encode(hello))
+        assertEquals("hello", helloJson.getString("cmd"))
+        assertEquals("Galaxy S25", helloJson.getString("guestName"))
+        assertEquals(setOf("v", "t", "seq", "ts", "cmd", "guestName"), helloJson.keySet())
+        assertEquals(setOf("v", "t", "seq", "ts", "cmd"), JSONObject(codec.encode(bye)).keySet())
+    }
+
+    @Test
+    fun `state with volume guests and revoked round trips`() {
+        val msg = RemoteMessage.State(seq = 43, sentAtMs = 9_998L, state = presenceState)
+        val text = codec.encode(msg)
+        val json = JSONObject(text)
+        assertEquals(35, json.getInt("volumePercent"))
+        assertTrue(json.getBoolean("revoked"))
+        val guests = json.getJSONArray("guests")
+        assertEquals(2, guests.length())
+        assertEquals(setOf("name", "lastSeenMs"), guests.getJSONObject(0).keySet())
+        assertEquals("Galaxy S25", guests.getJSONObject(0).getString("name"))
+        assertEquals(1_700_000_002_000L, guests.getJSONObject(0).getLong("lastSeenMs"))
+        assertEquals(msg, codec.decode(text))
+    }
+
+    @Test
+    fun `hello without guestName is rejected`() {
+        assertNull(codec.decode(cmdJson("hello")))
+        assertNull(codec.decode(cmdJson("hello") { it.put("guestName", "") }))
+        assertNull(codec.decode(cmdJson("hello") { it.put("guestName", "   ") }))
+        assertNull(codec.decode(cmdJson("hello") { it.put("guestName", 42) }))
+    }
+
+    @Test
+    fun `hello with mediaId or percent is rejected`() {
+        assertNull(codec.decode(cmdJson("hello") { it.put("guestName", "Galaxy").put("mediaId", "station:1") }))
+        assertNull(codec.decode(cmdJson("hello") { it.put("guestName", "Galaxy").put("percent", 10) }))
+    }
+
+    @Test
+    fun `guestName longer than 40 chars is rejected`() {
+        assertNull(codec.decode(cmdJson("hello") { it.put("guestName", "a".repeat(41)) }))
+        val ok = codec.decode(cmdJson("hello") { it.put("guestName", "a".repeat(40)) }) as RemoteMessage.Command
+        assertEquals(RemoteCommand.Hello("a".repeat(40)), ok.command)
+    }
+
+    @Test
+    fun `bye and other simple commands reject guestName`() {
+        assertNull(codec.decode(cmdJson("bye") { it.put("guestName", "Galaxy") }))
+        assertNull(codec.decode(cmdJson("play") { it.put("guestName", "Galaxy") }))
+        assertNull(codec.decode(cmdJson("select") { it.put("mediaId", "station:1").put("guestName", "Galaxy") }))
+        assertNull(codec.decode(cmdJson("volume") { it.put("percent", 5).put("guestName", "Galaxy") }))
+        assertEquals(RemoteCommand.Bye, (codec.decode(cmdJson("bye")) as RemoteMessage.Command).command)
+    }
+
+    @Test
+    fun `guest object with unknown key is rejected`() {
+        val json = JSONObject(codec.encode(RemoteMessage.State(1, 2, presenceState)))
+        json.getJSONArray("guests").getJSONObject(1).put("ip", "10.0.0.7")
+        assertNull(codec.decode(json.toString()))
+
+        val missingName = JSONObject(codec.encode(RemoteMessage.State(1, 2, presenceState)))
+        missingName.getJSONArray("guests").getJSONObject(0).remove("name")
+        assertNull(codec.decode(missingName.toString()))
+
+        val notObject = JSONObject(codec.encode(RemoteMessage.State(1, 2, presenceState)))
+        notObject.put("guests", org.json.JSONArray().put("Galaxy S25"))
+        assertNull(codec.decode(notObject.toString()))
+    }
+
+    @Test
+    fun `state volumePercent out of range is rejected`() {
+        val json = JSONObject(codec.encode(RemoteMessage.State(1, 2, presenceState)))
+        json.put("volumePercent", 101)
+        assertNull(codec.decode(json.toString()))
+        json.put("volumePercent", -1)
+        assertNull(codec.decode(json.toString()))
+        json.put("volumePercent", "50")
+        assertNull(codec.decode(json.toString()))
+        json.put("volumePercent", 100)
+        assertNotNull(codec.decode(json.toString()))
+    }
+
+    @Test
+    fun `revoked non-boolean is rejected`() {
+        val json = JSONObject(codec.encode(RemoteMessage.State(1, 2, presenceState)))
+        json.put("revoked", "true")
+        assertNull(codec.decode(json.toString()))
+        json.put("revoked", 1)
+        assertNull(codec.decode(json.toString()))
+        json.put("revoked", false)
+        val decoded = codec.decode(json.toString()) as RemoteMessage.State
+        assertEquals(false, decoded.state.revoked)
+    }
+
+    @Test
+    fun `state json without new keys decodes with defaults`() {
+        // 구(舊) 호스트가 보낸 state: volumePercent/guests/revoked 키 없음.
+        val legacy = JSONObject()
+            .put("v", 1).put("t", "state").put("seq", 5L).put("ts", 6L)
+            .put("mediaId", "station:1").put("title", "Fake FM").put("artist", "news")
+            .put("isPlaying", true).put("playbackState", 3).put("batteryPercent", 50)
+            .put("updatedAtMs", 7L)
+            .put("items", org.json.JSONArray().put(JSONObject().put("mediaId", "station:1").put("name", "Fake FM").put("subtitle", "news")))
+            .toString()
+        val decoded = codec.decode(legacy) as RemoteMessage.State
+        assertNull(decoded.state.volumePercent)
+        assertEquals(emptyList<RemoteGuest>(), decoded.state.guests)
+        assertEquals(false, decoded.state.revoked)
+    }
+
+    @Test
+    fun `default state omits guests and revoked keys`() {
+        // 게스트 없음·revoked=false·volume null 이면 새 키를 아예 쓰지 않는다(구 게스트 호환).
+        val json = JSONObject(codec.encode(RemoteMessage.State(1, 2, fullState)))
+        assertTrue(!json.has("guests") && !json.has("revoked") && !json.has("volumePercent"))
     }
 }
