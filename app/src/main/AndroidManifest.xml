@@ -6,6 +6,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 원격 제어(호스트: 브로커 상시 연결·블루투스 출력 감시 / 게스트: QR 스캔) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.CAMERA" />
     <!-- 재생을 멈추고 한동안 방치하면 시스템이 앱을 낮은 standby bucket으로 강등시켜,
          Android Auto가 백그라운드에서 MediaLibraryService를 다시 바인딩하지 못하고
          차량 미디어 소스 목록에서 사라지는 문제가 있었다. 배터리 최적화 제외를 요청해
@@ -36,6 +40,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 원격 제어 호스트: 역할이 "홈 플레이어"일 때만 기동. 구현: remote/host/RemoteHostService.kt -->
+        <service
+            android:name=".remote.host.RemoteHostService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <service
             android:name=".ARMSMediaLibraryService"

@@ -69,6 +69,8 @@ android {
     packaging {
         resources {
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            excludes += "META-INF/io.netty.versions.properties"
+            excludes += "META-INF/INDEX.LIST"
         }
     }
 }
@@ -82,6 +84,11 @@ dependencies {
     implementation(project(":core:playback"))
     implementation(project(":core:data"))
     implementation(project(":core:network"))
+    implementation(project(":core:remote"))
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // QR 페어링: 생성(core) + 스캔(embedded)
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.09.03"))
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.09.03"))
