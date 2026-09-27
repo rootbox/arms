@@ -912,7 +912,7 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                             label = { Text("내 음악", style = MaterialTheme.typography.labelMedium) },
                             colors = navigationBarItemColors()
                         )
-                        if (remoteRole == RemoteRole.GUEST) NavigationBarItem(
+                        if (remoteRole == RemoteRole.GUEST || selectedTab == 2) NavigationBarItem(
                             selected = selectedTab == 2,
                             onClick = { selectedTab = 2 },
                             icon = {
@@ -1128,10 +1128,11 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
         )
     }
 
-    // 게스트 역할이 풀리면 리모컨 탭에 머물 수 없다.
-    LaunchedEffect(remoteRole) {
-        if (remoteRole != RemoteRole.GUEST && selectedTab == 2) selectedTab = 0
-    }
+    // 저장소에서 역할이 바뀌면(게스트가 호스트의 연결 종료를 받는 경우 등) 화면 상태도 따라간다.
+    // 리모컨 탭에 머무는 동안은 탭을 유지해 "호스트가 연결을 종료했습니다" 안내를 볼 수 있게 하고,
+    // 다른 탭으로 나가면 탭이 사라진다.
+    val roleEvent by remoteSettingsStore.roleEvents.collectAsState()
+    LaunchedEffect(roleEvent) { remoteRole = remoteSettingsStore.getRole() }
 
     if (showRemoteSettings) {
         // 페어링 여부는 다이얼로그가 (다시) 열릴 때와 역할이 바뀔 때마다 다시 읽는다. 예전엔 처음 열릴 때

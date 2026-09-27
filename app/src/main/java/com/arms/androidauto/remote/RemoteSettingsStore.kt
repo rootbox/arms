@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.arms.androidauto.core.remote.Pairing
+import kotlinx.coroutines.flow.MutableStateFlow
 
 // 이 기기의 원격 제어 역할. 태블릿=HOST(홈 플레이어), 폰=GUEST(리모컨).
 enum class RemoteRole { NONE, HOST, GUEST }
@@ -26,7 +27,12 @@ class RemoteSettingsStore(context: Context) {
 
     fun setRole(role: RemoteRole) {
         prefs.edit().putString(KEY_ROLE, role.name).apply()
+        roleEvents.value = roleEvents.value + 1
     }
+
+    // 역할이 저장소에서 바뀌었음을 화면에 알리는 카운터. 게스트가 "연결 종료"를 받아 스스로 역할을 NONE으로
+    // 바꿔도 MainActivity가 이를 알 길이 없어 리모컨 탭이 남았다(rc4 검증).
+    val roleEvents = MutableStateFlow(0)
 
     // 호스트는 자기가 만든 페어링을, 게스트는 스캔한 페어링을 저장한다. QR 문자열 그대로 보관.
     fun getPairing(): Pairing? = prefs.getString(KEY_PAIRING, null)?.let { Pairing.fromQrText(it) }

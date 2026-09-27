@@ -159,8 +159,10 @@ fun RemoteControlScreen(
         }
     }
 
+    // 바깥 Scaffold가 이미 시스템 인셋을 처리했다. 여기서 또 넣으면 상단에 상태바 높이만큼 빈 띠가 생긴다(rc4 검증).
     Scaffold(
         containerColor = RadioBgDeep,
+        contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         if (revokedNotice) {
