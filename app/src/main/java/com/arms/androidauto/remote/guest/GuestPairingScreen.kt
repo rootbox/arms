@@ -401,6 +401,8 @@ fun GuestPairingScreen(
             onValueChange = {
                 manualCode = it
                 if (errorText != null) errorText = null
+                // 코드를 고치면 직전 시도의 검사·연결 실패 안내는 더 이상 맞지 않는다.
+                if (checkError != null) checkError = null
             },
             modifier = Modifier.fillMaxWidth(),
             singleLine = false,

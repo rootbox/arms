@@ -287,6 +287,12 @@ class RemoteGuestClient(
 
     fun stop() = stop(sendBye = true)
 
+    // 저장된 페어링이 바뀌었을 때: 이전 연결·설정 오류 상태를 버리고 새 페어링으로 다시 시작한다.
+    fun restart() {
+        stop(sendBye = false)
+        start()
+    }
+
     private fun stop(sendBye: Boolean) {
         val job = sessionJob ?: return
         val ch = channel

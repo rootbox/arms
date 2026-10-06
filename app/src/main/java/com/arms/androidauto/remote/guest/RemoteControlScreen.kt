@@ -122,6 +122,15 @@ fun RemoteControlScreen(
         }
     }
 
+    // 화면이 떠 있는 동안 페어링이 바뀌면(페어링 다시 하기·해제) 새 페어링으로 다시 연결한다.
+    val pairingEvent by store.pairingEvents.collectAsState()
+    var seenPairingEvent by remember { mutableStateOf(pairingEvent) }
+    LaunchedEffect(pairingEvent) {
+        if (pairingEvent == seenPairingEvent) return@LaunchedEffect
+        seenPairingEvent = pairingEvent
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) client.restart()
+    }
+
     val paired by client.paired.collectAsState()
     val connectionState by client.connectionState.collectAsState()
     val hostState by client.hostState.collectAsState()

@@ -39,11 +39,17 @@ class RemoteSettingsStore(context: Context) {
 
     fun savePairing(pairing: Pairing) {
         prefs.edit().putString(KEY_PAIRING, pairing.toQrText()).apply()
+        pairingEvents.value = pairingEvents.value + 1
     }
 
     fun clearPairing() {
         prefs.edit().remove(KEY_PAIRING).apply()
+        pairingEvents.value = pairingEvents.value + 1
     }
+
+    // 페어링이 바뀌었음을 이미 떠 있는 화면에 알린다. 리모컨 화면에서 "페어링 다시 하기"로 새 QR을 저장하고
+    // 돌아와도 예전(127.0.0.1) 상태가 그대로 남던 문제(2026-10-06 S25 검증).
+    val pairingEvents = MutableStateFlow(0)
 
     // 호스트의 브로커 설정(한 번만 입력). 페어링을 해제해도 남겨 두어 QR을 다시 만들 때 재입력하지 않는다.
     data class BrokerSettings(val url: String, val username: String, val password: String)
