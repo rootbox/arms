@@ -40,6 +40,7 @@ class RemoteChannel(
     private val nextSeq = AtomicLong(clock())
 
     val connectionState: StateFlow<ConnectionState> get() = transport.connectionState
+    val lastFailure: StateFlow<FailureKind?> get() = transport.lastFailure
     val states: Flow<HostState> get() = _states
     val commands: Flow<RemoteMessage.Command> get() = _commands
     val acks: Flow<RemoteMessage.Ack> get() = _acks

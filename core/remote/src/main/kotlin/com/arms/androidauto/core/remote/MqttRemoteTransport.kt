@@ -20,9 +20,13 @@ class MqttRemoteTransport(
     private val username: String,
     private val password: String,
     private val clientId: String,
+    // BrokerProbe(저장 전 일회성 확인)는 false. 운영 연결은 true(끊기면 라이브러리가 백오프로 계속 재시도).
+    private val autoReconnect: Boolean = true,
 ) : RemoteTransport {
     private val state = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> get() = state
+    private val failure = MutableStateFlow<FailureKind?>(null)
+    override val lastFailure: StateFlow<FailureKind?> get() = failure
 
     private class Endpoint(val host: String, val port: Int, val tls: Boolean, val webSocketPath: String?)
 
@@ -35,11 +39,12 @@ class MqttRemoteTransport(
             .identifier(clientId)
             .serverHost(ep.host)
             .serverPort(ep.port)
-            .automaticReconnectWithDefaultConfig()
             .addConnectedListener {
+                failure.value = null
                 state.value = ConnectionState.CONNECTED
             }
             .addDisconnectedListener { context ->
+                failure.value = RemoteFailure.classify(context.cause)
                 try {
                     // clean session이므로 재접속 후 브로커에 구독이 없다. 라이브러리가 다시 구독하게 한다.
                     context.reconnector.resubscribeIfSessionExpired(true)
@@ -48,6 +53,7 @@ class MqttRemoteTransport(
                     state.value = ConnectionState.DISCONNECTED
                 }
             }
+        if (autoReconnect) builder = builder.automaticReconnectWithDefaultConfig()
         if (ep.tls) builder = builder.sslWithDefaultConfig()
         if (ep.webSocketPath != null) {
             builder = builder.webSocketConfig().serverPath(ep.webSocketPath).applyWebSocketConfig()
@@ -68,8 +74,10 @@ class MqttRemoteTransport(
                 .applySimpleAuth()
                 .send()
                 .await()
+            failure.value = null
             state.value = ConnectionState.CONNECTED
         } catch (e: Exception) {
+            failure.value = RemoteFailure.classify(e)
             // 자동 재접속이 켜져 있으면 백그라운드에서 계속 시도하며 리스너가 상태를 갱신한다.
             if (state.value == ConnectionState.CONNECTING) state.value = ConnectionState.DISCONNECTED
             throw e

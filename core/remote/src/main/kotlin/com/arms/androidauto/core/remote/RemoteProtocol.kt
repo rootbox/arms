@@ -135,9 +135,14 @@ enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
 // 브로커 전송. 구현: MqttRemoteTransport(HiveMQ). 테스트용 인메모리 구현도 이 인터페이스로.
 interface RemoteTransport {
     val connectionState: kotlinx.coroutines.flow.StateFlow<ConnectionState>
+    // 마지막 연결 실패 원인(연결되면 null). 화면·로그에 "왜 안 붙는지"를 보여주는 데 쓴다.
+    val lastFailure: kotlinx.coroutines.flow.StateFlow<FailureKind?> get() = NO_FAILURE
     suspend fun connect()
     suspend fun publish(topic: String, payload: ByteArray, retain: Boolean)
     // 구독 콜백은 전송 스레드에서 불릴 수 있다. 호출자가 자기 스코프로 옮긴다.
     suspend fun subscribe(topic: String, onMessage: (ByteArray) -> Unit)
     suspend fun disconnect()
 }
+
+private val NO_FAILURE: kotlinx.coroutines.flow.StateFlow<FailureKind?> =
+    kotlinx.coroutines.flow.MutableStateFlow<FailureKind?>(null)
