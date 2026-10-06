@@ -1,0 +1,21 @@
+// verify.sh 전용 init 스크립트. 프로젝트 빌드 파일을 건드리지 않고 :core:remote CLI의
+// 런타임 클래스패스와 JDK 17 java 실행 파일 경로를 출력한다.
+// verify.sh는 이 값으로 java를 직접 실행한다(매 호출마다 Gradle 기동 지연이 측정에 섞이지 않게,
+// 그리고 비밀을 argv 대신 java @argfile 로 넘기기 위해).
+allprojects { p ->
+    if (p.path == ':core:remote') {
+        p.afterEvaluate {
+            p.tasks.register('printCliRuntime') {
+                dependsOn 'classes'
+                def cp = p.sourceSets.main.runtimeClasspath
+                def launcher = p.javaToolchains.launcherFor {
+                    languageVersion = JavaLanguageVersion.of(17)
+                }
+                doLast {
+                    println "BV_JAVA=" + launcher.get().executablePath.asFile.absolutePath
+                    println "BV_CP=" + cp.asPath
+                }
+            }
+        }
+    }
+}

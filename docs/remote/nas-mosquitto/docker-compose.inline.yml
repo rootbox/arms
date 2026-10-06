@@ -1,0 +1,50 @@
+# Simple Radio 원격 제어 브로커 (Mosquitto 2) — DSM Container Manager 프로젝트 "sr-mqtt"
+# 외부 경로: wss://mqtt.1319.space/ → DSM 리버스 프록시(443, WebSocket 헤더) → 127.0.0.1:18831 → 컨테이너 9001
+# 설정 파일은 시작할 때마다 컨테이너 안에서 새로 만든다(파일 업로드 불필요). 브로커는 암호문만 중계한다.
+# MQTT_PASSWORD는 DSM 화면에서 사용자가 직접 입력한다(채팅·저장소에 남기지 않음). 자리표시자 그대로면 시작하지 않는다.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: sr-mosquitto
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18831:9001"
+    environment:
+      MQTT_USER: "simpleradio"
+      MQTT_PASSWORD: "CHANGE_ME"
+    volumes:
+      - sr_mqtt_data:/mosquitto/data
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$MQTT_PASSWORD" ] || [ "$$MQTT_PASSWORD" = "CHANGE_ME" ]; then
+          echo "MQTT_PASSWORD가 설정되지 않았습니다. 프로젝트 YAML에서 CHANGE_ME를 바꾸세요."
+          exec sleep 2147483647
+        fi
+        set -e
+        mkdir -p /mosquitto/config /mosquitto/data
+        cat > /mosquitto/config/mosquitto.conf <<'CONF'
+        persistence true
+        persistence_location /mosquitto/data/
+        log_dest stdout
+        log_type error
+        log_type warning
+        log_type notice
+        connection_messages true
+        allow_anonymous false
+        password_file /mosquitto/config/passwd
+        acl_file /mosquitto/config/acl
+        max_keepalive 120
+        max_connections 50
+        message_size_limit 65536
+        listener 9001
+        protocol websockets
+        CONF
+        printf 'pattern readwrite sr/#\n' > /mosquitto/config/acl
+        rm -f /mosquitto/config/passwd
+        mosquitto_passwd -b -c /mosquitto/config/passwd "$$MQTT_USER" "$$MQTT_PASSWORD"
+        chown mosquitto:mosquitto /mosquitto/config/passwd /mosquitto/config/acl /mosquitto/data
+        chmod 0700 /mosquitto/config/passwd /mosquitto/config/acl
+        exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+volumes:
+  sr_mqtt_data:
