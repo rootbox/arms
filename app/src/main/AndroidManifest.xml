@@ -49,6 +49,8 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- 앱 업데이트 직후(벽걸이 기기는 업데이트 뒤 앱을 열 사람이 없다) -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

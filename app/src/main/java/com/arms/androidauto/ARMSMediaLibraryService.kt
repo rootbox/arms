@@ -283,6 +283,19 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 에러가 나면 자동으로 재시도하지 않고 그대로 멈춰있는다. 그러면 "재생되다가 중간에
         // 끊기고 다시 시작되지 않는" 증상으로 이어진다. 에러 발생 시 잠시 후 같은 채널을
         // 새로 서명된 URL로 다시 재생 시도하도록 한다.
+        // 재생 의도를 저장해 둔다(업데이트·재부팅 뒤 홈 플레이어가 이어서 재생할지 판단, AutoResumePolicy).
+        player.addListener(object : Player.Listener {
+            override fun onEvents(p: Player, events: Player.Events) {
+                playbackStateStore.setPlaybackIntent(
+                    AutoResumePolicy.isPlaybackIntended(
+                        playWhenReady = p.playWhenReady,
+                        hasItem = p.currentMediaItem != null,
+                        isIdle = p.playbackState == Player.STATE_IDLE,
+                        hasError = p.playerError != null,
+                    )
+                )
+            }
+        })
         player.addListener(object : Player.Listener {
             // 발라드/2세대 채널의 곡 정보는 재생 연결에 실려 오는 ICY 메타데이터로 받는다.
             // 별도 연결로 8초마다 스트림을 다시 여는 것보다 빠르고, 서버에 부담도 주지 않는다.

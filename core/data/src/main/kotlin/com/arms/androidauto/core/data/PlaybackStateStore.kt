@@ -98,6 +98,16 @@ class PlaybackStateStore(context: Context) {
         }.getOrDefault(emptyList())
     }
 
+    // "지금 재생을 원하는 상태인가"(재생 중이거나, 오류로 멈췄지만 복구를 기다리는 중). 사용자가 정지·일시정지하면
+    // false. 앱 업데이트·재부팅으로 프로세스가 사라져도 마지막 값이 남으므로, 벽걸이 기기(홈 플레이어)가
+    // 다시 켜질 때 이어서 재생할지 판단하는 데 쓴다.
+    fun setPlaybackIntent(active: Boolean) {
+        if (prefs.getBoolean(KEY_PLAYBACK_INTENT, false) == active) return
+        prefs.edit().putBoolean(KEY_PLAYBACK_INTENT, active).apply()
+    }
+
+    fun isPlaybackIntentActive(): Boolean = prefs.getBoolean(KEY_PLAYBACK_INTENT, false)
+
     // NAS가 설정되어 있는지를 평문으로 따로 들고 있는다. 실제 자격증명 확인(hasCredentials)은
     // 암호화 저장소를 열어야 해서 느리기 때문에, 차량 브라우징 루트처럼 빨라야 하는 곳에서는
     // 이 플래그만 본다. 자격증명 자체가 아니라 "설정됨 여부"만 저장하므로 노출 위험이 없다.
@@ -128,6 +138,7 @@ class PlaybackStateStore(context: Context) {
         private const val KEY_LAST_NAS_ALBUM = "last_played_nas_album"
         private const val KEY_RECENT_ALBUMS = "recent_nas_albums"
         private const val KEY_NAS_CONFIGURED = "nas_configured"
+        private const val KEY_PLAYBACK_INTENT = "playback_intent"
 
         private const val KEY_LAST_PLAYLIST_ID = "last_played_playlist_id"
         private const val KEY_LAST_PLAYLIST_NAME = "last_played_playlist_name"
