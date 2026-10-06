@@ -14,6 +14,8 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
@@ -26,16 +28,20 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.arms.androidauto.ARMSMediaLibraryService
+import com.arms.androidauto.BuildConfig
 import com.arms.androidauto.MainActivity
 import com.arms.androidauto.R
 import com.arms.androidauto.core.data.StationRepository
 import com.arms.androidauto.core.model.Station
+import com.arms.androidauto.core.remote.BrokerUrlPolicy
 import com.arms.androidauto.core.remote.ConnectionState
+import com.arms.androidauto.core.remote.FailureKind
 import com.arms.androidauto.core.remote.HostState
 import com.arms.androidauto.core.remote.MqttRemoteTransport
 import com.arms.androidauto.core.remote.Pairing
 import com.arms.androidauto.core.remote.RemoteChannel
 import com.arms.androidauto.core.remote.RemoteCommand
+import com.arms.androidauto.core.remote.RemoteFailure
 import com.arms.androidauto.core.remote.RemoteGuest
 import com.arms.androidauto.core.remote.RemoteItem
 import com.arms.androidauto.core.remote.RemoteMessage
@@ -46,7 +52,9 @@ import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,9 +62,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
@@ -70,6 +80,11 @@ import kotlin.math.roundToInt
 // - "브로커에 붙어 있음"(brokerState)과 "게스트가 붙어 있음"(guests)은 다르다. 게스트는 Hello/Bye와
 //   lastSeen 만료(3분, GuestRegistry)로 센다. 화면(상단바 칩·QR 화면)은 companion의 StateFlow만 본다.
 // - 알림은 딱 하나 "리모컨 대기 중"이며 상태 변화로 다시 게시하지 않는다.
+// - 브로커 연결은 감독 루프(superviseChannel)가 책임진다(2026-10-06 사고: 부팅 때 한 번 실패하면 영원히
+//   구독하지 않았다). 실패하면 5→10→20→40→60s 백오프로 서비스가 사는 동안 계속 재시도, 붙은 뒤 끊기면
+//   채널을 새로 만들어 다시 붙는다. 네트워크 복구·"지금 다시 연결"은 남은 대기를 건너뛴다(최소 5s 간격).
+// - 저장된 브로커 주소가 정책상 쓸 수 없으면(127.0.0.1 등, release) 연결하지 않고 status=InvalidConfig.
+// - 화면용 요약 상태는 status(HostStatus) 하나로 본다.
 class RemoteHostService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -96,6 +111,21 @@ class RemoteHostService : Service() {
     private var volumeReceiver: BroadcastReceiver? = null
     private var running = false
 
+    // ---- 브로커 감독 상태(모두 main에서만 바뀐다) ----
+    private var configProblem: BrokerUrlPolicy.Problem? = null
+    // 마지막 정상 연결 이후 연속 시작 시도 횟수(1부터)와 연속 실패 횟수.
+    private var startAttempt = 0
+    private var consecutiveFailures = 0
+    // 마지막 정상 연결 이후 처음 실패/끊긴 시각. 정상이면 null.
+    private var failingSinceMs: Long? = null
+    private var lastFailure: FailureKind? = null
+    // "명령 토픽 구독까지 끝남"을 포함한 실효 상태(status 계산용). 전송 자체 상태는 brokerState.
+    private var effectiveState = ConnectionState.DISCONNECTED
+    private var lastAttemptStartMs = 0L
+    // 즉시 재시도 요청(네트워크 복구·retryNow) 카운터. 어느 스레드에서 올려도 된다.
+    private val retryRequests = MutableStateFlow(0L)
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
             requestPublish()
@@ -113,16 +143,20 @@ class RemoteHostService : Service() {
             stopSelf()
             return
         }
-        if (!startInForeground()) {
+        // 개발용 주소(127.0.0.1, adb reverse 전용)는 debug 빌드에서만 허용한다.
+        val problem = (BrokerUrlPolicy.check(p.brokerUrl, allowLoopback = BuildConfig.DEBUG) as? BrokerUrlPolicy.Result.Invalid)?.problem
+        if (!startInForeground(configError = problem != null)) {
             stopSelf()
             return
         }
         pairing = p
+        configProblem = problem
         running = true
         instance = this
         _guests.value = emptyList()
         _brokerState.value = ConnectionState.DISCONNECTED
         _isRunning.value = true
+        updateStatus()
         Log.i("ARMS", "리모컨 호스트 시작 (pair ${p.pairId.take(4)}…)")
 
         stationRepository = StationRepository(this)
@@ -132,7 +166,14 @@ class RemoteHostService : Service() {
         registerBatteryReceiver()
         registerVolumeReceiver()
         connectController()
-        startChannel(p, store.clientId() + "-host")
+        if (problem != null) {
+            // 서비스는 살려 둔다(상단바 칩이 "리모컨 설정 오류"를 보여야 한다). 연결은 시도하지 않는다.
+            Log.w("ARMS", "리모컨 호스트: 브로커 주소 사용 불가 ($problem)")
+        } else {
+            superviseChannel(p, store.clientId() + "-host")
+            registerNetworkCallback()
+            startBrokenLog()
+        }
         observeStations()
         observeBluetooth()
         startHeartbeat()
@@ -148,6 +189,10 @@ class RemoteHostService : Service() {
             batteryReceiver = null
             volumeReceiver?.let { runCatching { unregisterReceiver(it) } }
             volumeReceiver = null
+            networkCallback?.let { cb ->
+                runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
+            }
+            networkCallback = null
             monitor.stop()
             controller?.removeListener(playerListener)
             controller?.release()
@@ -166,6 +211,7 @@ class RemoteHostService : Service() {
                 _guests.value = emptyList()
                 _brokerState.value = ConnectionState.DISCONNECTED
                 _isRunning.value = false
+                _status.value = HostStatus.NotRunning
             }
             // 브로커 연결 정리는 서비스 스코프 밖에서(취소돼도 끝까지) 짧게.
             CoroutineScope(Dispatchers.IO).launch {
@@ -182,7 +228,7 @@ class RemoteHostService : Service() {
 
     // ---- 포그라운드/알림 ----
 
-    private fun startInForeground(): Boolean {
+    private fun startInForeground(configError: Boolean): Boolean {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -198,8 +244,11 @@ class RemoteHostService : Service() {
         )
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_radio)
-            .setContentTitle("리모컨 대기 중")
-            .setContentText("폰의 리모컨으로 이 기기를 조작할 수 있습니다")
+            .setContentTitle(if (configError) "리모컨 설정 오류" else "리모컨 대기 중")
+            .setContentText(
+                if (configError) "앱의 리모컨 페어링 화면에서 브로커 주소를 다시 설정하세요"
+                else "폰의 리모컨으로 이 기기를 조작할 수 있습니다",
+            )
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setSilent(true)
@@ -240,29 +289,80 @@ class RemoteHostService : Service() {
         }, MoreExecutors.directExecutor())
     }
 
-    // ---- 브로커 채널 ----
+    // ---- 브로커 채널(감독 루프) ----
 
-    private fun startChannel(p: Pairing, clientId: String) {
-        val tr = MqttRemoteTransport(p.brokerUrl, p.username, p.password, clientId = clientId)
-        val ch = RemoteChannel(p, tr, scope)
-        transport = tr
-        channel = ch
+    // 서비스가 사는 동안 끝나지 않는다. 한 바퀴 = 새 전송·채널로 시작 시도 → 성공하면 끊길 때까지 명령 수신
+    // → 정리 → (백오프) → 다음 바퀴. 전송은 autoReconnect=false로 만든다: HiveMQ 1.3.3은 자동 재접속이 켜져
+    // 있으면 첫 connect가 실패해도 future가 끝나지 않고(재접속 성공까지 대기), disconnect()로도 그 재접속을
+    // 멈출 수 없다 → 새 전송을 만들 때마다 같은 clientId의 클라이언트가 뒤에서 계속 붙으려 해 서로 쫓아낸다.
+    // 그래서 재접속은 이 루프만 한다(끊김 즉시 감지·재구독·상태 재게시까지 한 경로).
+    private fun superviseChannel(p: Pairing, clientId: String) {
         scope.launch {
-            tr.connectionState.collect { st ->
-                Log.i("ARMS", "리모컨 호스트: 브로커 $st")
-                if (instance === this@RemoteHostService) _brokerState.value = st
+            while (isActive) {
+                val tick = retryRequests.value
+                lastAttemptStartMs = System.currentTimeMillis()
+                startAttempt++
+                effectiveState = ConnectionState.CONNECTING
+                updateStatus()
+
+                val tr = MqttRemoteTransport(p.brokerUrl, p.username, p.password, clientId = clientId, autoReconnect = false)
+                val ch = RemoteChannel(p, tr, scope)
+                transport = tr
+                channel = ch
+                val stateJob = launch { tr.connectionState.collect { st -> onTransportState(st) } }
+
+                val failure: Throwable? = try {
+                    withTimeout(START_TIMEOUT_MS) { ch.start(asHost = true) }
+                    null
+                } catch (e: TimeoutCancellationException) {
+                    e
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    stateJob.cancel()
+                    throw e
+                } catch (t: Throwable) {
+                    t
+                }
+
+                if (failure == null) {
+                    runConnected(ch, tr)
+                    // 끊김: 바로 다음 바퀴(직전 시도 시작에서 최소 5s는 띄운다 — 붙자마자 끊기는 경우의 폭주 방지).
+                    stateJob.cancel()
+                    teardown(ch, tr)
+                    waitForRetry(0L, tick)
+                } else {
+                    stateJob.cancel()
+                    teardown(ch, tr)
+                    val kind = failureKindOf(failure, tr)
+                    lastFailure = kind
+                    if (failingSinceMs == null) failingSinceMs = System.currentTimeMillis()
+                    consecutiveFailures++
+                    effectiveState = ConnectionState.DISCONNECTED
+                    updateStatus()
+                    val delayMs = StartRetryPolicy.nextDelayMs(consecutiveFailures)
+                    Log.w("ARMS", "리모컨 호스트: 브로커 연결 실패 ($kind) — ${delayMs / 1000}s 후 재시도")
+                    waitForRetry(delayMs, tick)
+                }
             }
         }
-        scope.launch {
-            try {
-                ch.start(asHost = true)
-                channelReady = true
-                Log.i("ARMS", "리모컨 호스트: 채널 시작")
-                requestPublish(forced = true)
-            } catch (t: Throwable) {
-                Log.w("ARMS", "리모컨 호스트: 채널 시작 실패 ${t.javaClass.simpleName}: ${t.message}")
-                return@launch
-            }
+    }
+
+    // 채널이 구독까지 마친 상태. 전송이 끊길 때까지 명령을 받는다.
+    private suspend fun runConnected(ch: RemoteChannel, tr: MqttRemoteTransport) {
+        channelReady = true
+        startAttempt = 0
+        consecutiveFailures = 0
+        val wasFailingSince = failingSinceMs
+        failingSinceMs = null
+        lastFailure = null
+        effectiveState = ConnectionState.CONNECTED
+        updateStatus()
+        if (wasFailingSince != null) {
+            Log.i("ARMS", "리모컨 호스트: 채널 시작 (미연결 ${(System.currentTimeMillis() - wasFailingSince) / 1000}s 만에 복구)")
+        } else {
+            Log.i("ARMS", "리모컨 호스트: 채널 시작")
+        }
+        requestPublish(forced = true)
+        val commandJob = scope.launch {
             try {
                 ch.commands.collect { msg -> onCommand(msg) }
             } catch (t: Throwable) {
@@ -270,6 +370,111 @@ class RemoteHostService : Service() {
                 Log.w("ARMS", "리모컨 호스트: 명령 수신 중단 ${t.javaClass.simpleName}: ${t.message}")
             }
         }
+        try {
+            // 자동 재접속을 끈 전송이라 한 번 끊기면 다시 붙지 않는다 → 끊기는 즉시 이 바퀴를 끝낸다.
+            tr.connectionState.first { it != ConnectionState.CONNECTED }
+        } finally {
+            commandJob.cancel()
+            channelReady = false
+        }
+        val kind = tr.lastFailure.value ?: FailureKind.CLOSED
+        lastFailure = kind
+        failingSinceMs = System.currentTimeMillis()
+        effectiveState = ConnectionState.DISCONNECTED
+        updateStatus()
+        Log.w("ARMS", "리모컨 호스트: 브로커 연결 끊김 ($kind) → 채널 다시 시작")
+    }
+
+    // delayMs 동안 기다리되, 그 사이(또는 이번 시도 중에) 즉시 재시도 요청이 오면 일찍 깬다.
+    // 어떤 경우에도 직전 시도 시작으로부터 StartRetryPolicy.MIN_GAP_MS 안에는 다시 시도하지 않는다.
+    private suspend fun waitForRetry(delayMs: Long, tickAtAttempt: Long) {
+        val early = if (delayMs <= 0L) {
+            false
+        } else {
+            withTimeoutOrNull(delayMs) { retryRequests.first { it != tickAtAttempt } } != null
+        }
+        if (early) Log.i("ARMS", "리모컨 호스트: 즉시 재시도 (남은 대기 건너뜀)")
+        val gap = StartRetryPolicy.minGapRemainingMs(lastAttemptStartMs, System.currentTimeMillis())
+        if (gap > 0L) delay(gap)
+    }
+
+    private fun failureKindOf(t: Throwable, tr: MqttRemoteTransport): FailureKind {
+        if (t is TimeoutCancellationException) return tr.lastFailure.value ?: FailureKind.TIMEOUT
+        val kind = RemoteFailure.classify(t)
+        return if (kind == FailureKind.UNKNOWN) tr.lastFailure.value ?: kind else kind
+    }
+
+    private suspend fun teardown(ch: RemoteChannel, tr: MqttRemoteTransport) {
+        if (channel === ch) channel = null
+        if (transport === tr) transport = null
+        channelReady = false
+        withContext(NonCancellable) {
+            withTimeoutOrNull(3_000L) { runCatching { ch.stop() } }
+        }
+    }
+
+    private fun onTransportState(st: ConnectionState) {
+        if (instance !== this) return
+        if (_brokerState.value != st && (st == ConnectionState.CONNECTED || consecutiveFailures == 0)) {
+            // 실패가 이어지는 동안의 CONNECTING/DISCONNECTED 반복은 "연결 실패" 한 줄로 충분하다.
+            Log.i("ARMS", "리모컨 호스트: 브로커 $st")
+        }
+        _brokerState.value = st
+    }
+
+    // 네트워크(기본 네트워크)가 새로 잡히면 남은 백오프를 건너뛴다. 등록 직후 한 번 불리는 것은 무해하다.
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (running && effectiveState != ConnectionState.CONNECTED) {
+                    retryRequests.update { it + 1 }
+                }
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+        } catch (e: Exception) {
+            Log.w("ARMS", "리모컨 호스트: 네트워크 콜백 등록 실패 ${e.javaClass.simpleName}")
+        }
+    }
+
+    // 끊겨 있는 동안 10분마다 한 줄(사고 때는 상태가 바뀔 때만 로그가 남아 4일간 흔적이 없었다).
+    private fun startBrokenLog() {
+        scope.launch {
+            var nextMinutes = BROKEN_LOG_EVERY_MIN
+            while (isActive) {
+                delay(BROKEN_LOG_CHECK_MS)
+                val since = failingSinceMs
+                if (since == null || effectiveState == ConnectionState.CONNECTED) {
+                    nextMinutes = BROKEN_LOG_EVERY_MIN
+                    continue
+                }
+                val minutes = (System.currentTimeMillis() - since) / 60_000L
+                if (minutes >= nextMinutes) {
+                    Log.w("ARMS", "리모컨 호스트: 브로커 미연결 ${minutes}분째 (${lastFailure ?: FailureKind.UNKNOWN})")
+                    nextMinutes = (minutes / BROKEN_LOG_EVERY_MIN + 1) * BROKEN_LOG_EVERY_MIN
+                }
+            }
+        }
+    }
+
+    private fun requestRetry() {
+        retryRequests.update { it + 1 }
+    }
+
+    private fun updateStatus() {
+        if (instance !== this) return
+        _status.value = HostStatusPolicy.compute(
+            running = running,
+            configProblem = configProblem,
+            brokerState = effectiveState,
+            lastFailure = lastFailure,
+            failingSinceMs = failingSinceMs,
+            guests = registry.guests,
+            attempt = startAttempt,
+        )
     }
 
     // ---- 관찰: 채널 목록·블루투스·배터리·볼륨 ----
@@ -432,6 +637,7 @@ class RemoteHostService : Service() {
 
     private fun publishGuests() {
         if (instance === this) _guests.value = registry.guests
+        updateStatus()
     }
 
     // ---- 명령 처리 ----
@@ -558,6 +764,10 @@ class RemoteHostService : Service() {
         private const val GUEST_SWEEP_MS = 30_000L
         private const val REVOKE_TIMEOUT_MS = 2_000L
         private const val REVOKE_SETTLE_MS = 500L
+        // 한 번의 시작 시도(connect+subscribe) 상한. HiveMQ 자체 소켓 타임아웃(10s)보다 넉넉히.
+        private const val START_TIMEOUT_MS = 30_000L
+        private const val BROKEN_LOG_EVERY_MIN = 10L
+        private const val BROKEN_LOG_CHECK_MS = 30_000L
 
         // 서비스는 프로세스당 하나. 화면(상단바 칩·페어링 화면)이 서비스에 바인드하지 않고 이 흐름만 본다.
         // 서비스가 꺼져 있으면 각각 false / 빈 목록 / DISCONNECTED.
@@ -565,12 +775,15 @@ class RemoteHostService : Service() {
         private val _isRunning = MutableStateFlow(false)
         private val _guests = MutableStateFlow<List<RemoteGuest>>(emptyList())
         private val _brokerState = MutableStateFlow(ConnectionState.DISCONNECTED)
+        private val _status = MutableStateFlow<HostStatus>(HostStatus.NotRunning)
 
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
         // 지금 붙어 있는 게스트(Hello 수신 순). 브로커 연결과 무관하게 "누가 리모컨을 열고 있나"만 뜻한다.
         val guests: StateFlow<List<RemoteGuest>> = _guests.asStateFlow()
         // 브로커 연결 상태. "연결됨" 표시의 근거가 아니라 진단용.
         val brokerState: StateFlow<ConnectionState> = _brokerState.asStateFlow()
+        // 화면용 요약 상태(설정 오류/연결 중/오프라인/준비됨+게스트). 서비스가 꺼져 있으면 NotRunning.
+        val status: StateFlow<HostStatus> = _status.asStateFlow()
 
         private fun intent(context: Context) = Intent(context, RemoteHostService::class.java)
 
@@ -596,6 +809,19 @@ class RemoteHostService : Service() {
 
         fun stop(context: Context) {
             runCatching { context.stopService(intent(context)) }
+        }
+
+        // "지금 다시 연결": 서비스가 떠 있으면 남은 백오프를 건너뛰고 바로 다시 붙는다(최소 5s 간격은 지킨다).
+        // 꺼져 있으면 역할/페어링에 맞춰 켠다(암호화 저장소 열기는 백그라운드에서). 어느 스레드에서 불러도 된다.
+        fun retryNow(context: Context) {
+            val live = instance
+            if (live != null && live.running) {
+                Log.i("ARMS", "리모컨 호스트: 지금 다시 연결 요청")
+                live.requestRetry()
+                return
+            }
+            val app = context.applicationContext
+            CoroutineScope(Dispatchers.IO).launch { runCatching { syncWithRole(app) } }
         }
 
         // 페어링을 새로 만들었을 때: 서비스는 onCreate에서만 페어링을 읽으므로 껐다 켠다(둘 다 main 큐에서 순서대로).
@@ -654,9 +880,14 @@ class RemoteHostService : Service() {
             clientSuffix: String,
             block: suspend (RemoteChannel) -> Unit,
         ) {
+            if (BrokerUrlPolicy.check(pairing.brokerUrl, allowLoopback = BuildConfig.DEBUG) is BrokerUrlPolicy.Result.Invalid) return
             withContext(Dispatchers.IO) {
                 withTimeoutOrNull(5_000L) {
-                    val tr = MqttRemoteTransport(pairing.brokerUrl, pairing.username, pairing.password, clientId = store.clientId() + clientSuffix)
+                    // 일회성 연결: 자동 재접속을 켜면 실패 시 connect가 끝나지 않고 클라이언트가 뒤에서 계속 붙으려 한다.
+                    val tr = MqttRemoteTransport(
+                        pairing.brokerUrl, pairing.username, pairing.password,
+                        clientId = store.clientId() + clientSuffix, autoReconnect = false,
+                    )
                     val ch = RemoteChannel(pairing, tr, this)
                     try {
                         ch.start(asHost = true)

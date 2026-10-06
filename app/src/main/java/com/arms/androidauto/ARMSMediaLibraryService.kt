@@ -161,11 +161,13 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // (바인더 트랜잭션 크기 한계 방어).
     private val MAX_CHILDREN_PER_PAGE = 500
 
-    // 재생 에러 자동 재시도 폭주 방지
-    private val MAX_ERROR_RETRIES = 2
-    private val ERROR_RETRY_WINDOW_MS = 30_000L
+    // 재생 에러 자동 복구(PlaybackRecoveryPolicy). 연속 실패 횟수와 대기 중인 복구 작업.
     private var errorRetryCount = 0
     private var lastErrorRetryAtMs = 0L
+    private var errorRecoveryJob: kotlinx.coroutines.Job? = null
+    private var pendingRecoveryMediaId: String? = null
+    private var healthyPlaybackSinceMs = 0L
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
 
     // 편성/곡 정보를 다시 확인할 주기. 방송 전환은 보통 정시/30분 단위지만,
     // K-POP은 곡이 3~4분마다 바뀌므로 그보다 짧게 잡아 갱신 지연을 최소화한다.
@@ -300,34 +302,17 @@ class ARMSMediaLibraryService : MediaLibraryService() {
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 val mediaId = player.currentMediaItem?.mediaId ?: return
-                // 재시도가 무한히 반복되지 않도록 짧은 시간 안의 연속 실패는 끊는다.
+                // 한동안 정상 재생된 뒤의 오류는 새 사건으로 본다(빠른 재시도부터 다시).
                 val now = System.currentTimeMillis()
-                if (now - lastErrorRetryAtMs > ERROR_RETRY_WINDOW_MS) errorRetryCount = 0
-                if (errorRetryCount >= MAX_ERROR_RETRIES) return
+                if (healthyPlaybackSinceMs > 0 && now - healthyPlaybackSinceMs >= PlaybackRecoveryPolicy.HEALTHY_PLAYBACK_RESET_MS) {
+                    errorRetryCount = 0
+                }
+                healthyPlaybackSinceMs = 0L
                 errorRetryCount++
                 lastErrorRetryAtMs = now
-
-                serviceScope.launch {
-                    delay(3000L)
-                    try {
-                        if (MediaIdScheme.isNas(mediaId)) {
-                            // NAS는 스트리밍 URL에 세션(sid)이 박혀 있어, 세션이 만료되면
-                            // 큐 중간부터 실패한다. 같은 앨범을 새 세션으로 다시 만들어
-                            // 듣던 위치에서 이어 재생한다.
-                            retryNasPlayback()
-                        } else {
-                            val station = stationRepository.getAllStations().first().find { it.id == mediaId }
-                                ?: return@launch
-                            player.setMediaItem(quickPlayableItem(station))
-                            player.prepare()
-                            player.play()
-                            scheduleImmediateRefresh()
-                        }
-                    } catch (e: Exception) {
-                        // 이번 재시도가 실패해도, 다시 에러가 나면 onPlayerError가 또 호출되어
-                        // 재시도가 이어진다 (위 카운터가 폭주를 막는다).
-                    }
-                }
+                val wait = PlaybackRecoveryPolicy.nextDelayMs(errorRetryCount)
+                android.util.Log.w("ARMS", "재생 오류 ${error.errorCodeName} ($mediaId) — ${wait / 1000}s 후 복구 시도 #$errorRetryCount")
+                scheduleErrorRecovery(mediaId, wait)
             }
 
             // 내비 음성인식(티맵 등)이나 어시스턴트가 오디오 포커스를 가져가면 ExoPlayer가
@@ -338,6 +323,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // 채널을 켠 직후의 첫 정보 채움은 타이머(1.5초)가 아니라 실제 재생 시작에 맞춘다.
             // (갱신 루프는 isPlaying이 아니면 건너뛰므로 HLS 버퍼링 중 타이머가 헛돌곤 했다)
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying && healthyPlaybackSinceMs == 0L) healthyPlaybackSinceMs = System.currentTimeMillis()
                 val id = player.currentMediaItem?.mediaId ?: return
                 if (isPlaying && appliedStationId == null && !MediaIdScheme.isNas(id)) {
                     serviceScope.launch { refreshCurrentNowPlaying(initial = true) }
@@ -400,6 +386,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // (재생 시작 시점 한 번만 값을 채우던 기존 방식으로는 방송이 바뀌거나, K-POP처럼
         //  네트워크 호출이 여러 단계라 간헐적으로 유실되는 경우를 따라잡을 수 없었다.)
         startNowPlayingRefreshLoop()
+        registerNetworkRecovery()
 
         // 4. 차량 연결/해제를 직접 관찰 (차에서 내린 뒤 폰으로 재생이 새는 것을 막는다)
         observeCarConnection()
@@ -441,6 +428,11 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        errorRecoveryJob?.cancel()
+        networkCallback?.let { cb ->
+            runCatching { getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
+        }
+        networkCallback = null
         lastNotificationFingerprint = null
         nowPlayingRefreshJob?.cancel()
         carConnectionObserver?.let { carConnection?.type?.removeObserver(it) }
@@ -697,9 +689,67 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         }
     }
 
+    // 오류 복구를 예약한다. 대기 중 사용자가 정지/일시정지/다른 채널로 바꿨으면 하지 않는다.
+    private fun scheduleErrorRecovery(mediaId: String, waitMs: Long) {
+        errorRecoveryJob?.cancel()
+        pendingRecoveryMediaId = mediaId
+        errorRecoveryJob = serviceScope.launch {
+            delay(waitMs)
+            runErrorRecovery(mediaId)
+        }
+    }
+
+    private suspend fun runErrorRecovery(mediaId: String) {
+        pendingRecoveryMediaId = null
+        if (player.currentMediaItem?.mediaId != mediaId || !player.playWhenReady || player.playerError == null) return
+        android.util.Log.i("ARMS", "재생 복구 시도 #$errorRetryCount ($mediaId)")
+        try {
+            if (MediaIdScheme.isNas(mediaId)) {
+                // NAS는 스트리밍 URL에 세션(sid)이 박혀 있어, 세션이 만료되면
+                // 큐 중간부터 실패한다. 같은 앨범을 새 세션으로 다시 만들어
+                // 듣던 위치에서 이어 재생한다.
+                retryNasPlayback()
+            } else {
+                val station = stationRepository.getAllStations().first().find { it.id == mediaId } ?: return
+                // 지상파 스트림 URL은 서명 토큰이 만료되므로 quickPlayableItem이 매번 새로 받는다.
+                player.setMediaItem(quickPlayableItem(station))
+                player.prepare()
+                player.play()
+                scheduleImmediateRefresh()
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            // 복구 준비(URL 조회 등) 자체가 실패하면 플레이어 오류가 나지 않으므로 여기서 다음 시도를 건다.
+            errorRetryCount++
+            val wait = PlaybackRecoveryPolicy.nextDelayMs(errorRetryCount)
+            android.util.Log.w("ARMS", "재생 복구 준비 실패 ${e.javaClass.simpleName} — ${wait / 1000}s 후 재시도")
+            scheduleErrorRecovery(mediaId, wait)
+        }
+    }
+
+    // 네트워크가 (다시) 잡히면 대기 중인 오류 복구를 바로 실행한다. 새벽 공유기 재시작 같은 짧은 단절 뒤
+    // 최대 10분 대기를 기다리지 않게.
+    private fun registerNetworkRecovery() {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                serviceScope.launch {
+                    val id = pendingRecoveryMediaId ?: return@launch
+                    errorRecoveryJob?.cancel()
+                    delay(2_000L) // 라우팅·DNS가 자리 잡을 시간
+                    android.util.Log.i("ARMS", "네트워크 복귀 — 재생 복구 즉시 시도")
+                    runErrorRecovery(id)
+                }
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(cb) }.onSuccess { networkCallback = cb }
+    }
+
     private fun stopPlaybackAndClearBuffer() {
         // 차량이 없는데 뒤늦게 폰에서 소리가 나면 안 되므로 자동 재개 대기도 함께 끊는다.
         audioFocusResumeJob?.cancel()
+        errorRecoveryJob?.cancel()
+        pendingRecoveryMediaId = null
         pausedByAudioFocusLoss = false
         player.stop()
         player.clearMediaItems()
@@ -1138,6 +1188,11 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             startIndex: Int,
             startPositionMs: Long
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = asyncResult {
+            // 사용자가(폰·차량·리모컨) 새로 고른 재생은 새 사건: 이전 오류 백오프를 이어받지 않는다.
+            errorRecoveryJob?.cancel()
+            pendingRecoveryMediaId = null
+            errorRetryCount = 0
+            healthyPlaybackSinceMs = 0L
             val resolved = resolveMediaItems(controller, mediaItems)
             // 폰 화면은 "n번째 곡부터/이어듣기 위치"를 요청 메타데이터로 보낸다(SessionAudioPlayer 참고).
             val extras = mediaItems.firstOrNull()?.requestMetadata?.extras

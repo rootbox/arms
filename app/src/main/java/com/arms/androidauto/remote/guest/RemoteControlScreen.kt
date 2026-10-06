@@ -129,6 +129,10 @@ fun RemoteControlScreen(
     val error by client.error.collectAsState()
     val lastAckResult by client.lastAckResult.collectAsState()
     val revokedNotice by client.revokedNotice.collectAsState()
+    val lastFailure by client.lastFailure.collectAsState()
+    val configProblem by client.configProblem.collectAsState()
+    val subscribedAtMs by client.subscribedAtMs.collectAsState()
+    val lastAckAtMs by client.lastAckAtMs.collectAsState()
 
     // "n분 전" 계산용 현재 시각. 30초마다 갱신해 상태 줄이 저절로 늙는다.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -139,10 +143,27 @@ fun RemoteControlScreen(
         }
     }
     // 상태가 새로 오면 즉시 "지금"으로 맞춘다.
-    LaunchedEffect(hostState?.updatedAtMs) { nowMs = System.currentTimeMillis() }
+    LaunchedEffect(hostState?.updatedAtMs, lastAckAtMs) { nowMs = System.currentTimeMillis() }
+    // 구독 직후 유예(10초)가 끝나는 순간 "태블릿 응답 없음"을 바로 판단할 수 있게 한 번 더 깨운다.
+    LaunchedEffect(subscribedAtMs) {
+        if (subscribedAtMs == null) return@LaunchedEffect
+        delay(GuestStatusPolicy.HOST_REPLY_GRACE_MS + 500L)
+        nowMs = System.currentTimeMillis()
+    }
 
-    val status = GuestStatusPolicy.compute(paired, connectionState, hostState, nowMs, revoked = revokedNotice)
-    val canSend = GuestStatusPolicy.canSend(connectionState, pendingSeq)
+    val status = GuestStatusPolicy.compute(
+        paired = paired,
+        connectionState = connectionState,
+        hostState = hostState,
+        nowMs = nowMs,
+        revoked = revokedNotice,
+        configProblem = configProblem,
+        lastFailure = lastFailure,
+        subscribedAtMs = subscribedAtMs,
+        lastAckAtMs = lastAckAtMs,
+    )
+    val canSend = GuestStatusPolicy.canSend(status, connectionState, pendingSeq)
+    val problemDetail = GuestStatusPolicy.problemDetail(status)
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(error) {
@@ -188,6 +209,17 @@ fun RemoteControlScreen(
                 StatusLine(status = status, isBusy = pendingSeq != null, onOpenPairing = onOpenPairing)
                 Spacer(Modifier.height(Spacing.lg))
             }
+            if (problemDetail != null) {
+                item(key = "problem") {
+                    ConnectionProblemCard(
+                        message = problemDetail,
+                        // 브로커 실패: 백오프를 건너뛰고 바로 시도. 설정 오류: 저장된 페어링을 다시 읽어 검사한다.
+                        onRetry = { client.retryNow() },
+                        onOpenPairing = onOpenPairing,
+                    )
+                    Spacer(Modifier.height(Spacing.lg))
+                }
+            }
             item(key = "nowplaying") {
                 NowPlayingHeader(state = hostState, status = status)
                 Spacer(Modifier.height(Spacing.xl))
@@ -210,7 +242,7 @@ fun RemoteControlScreen(
                 item(key = "volume") {
                     VolumeRow(
                         hostVolume = volume,
-                        enabled = connectionState == ConnectionState.CONNECTED,
+                        enabled = connectionState == ConnectionState.CONNECTED && problemDetail == null,
                         onCommit = { client.setVolume(it) },
                     )
                     Spacer(Modifier.height(Spacing.xl))
@@ -448,13 +480,49 @@ private val VolumeUpIcon: ImageVector by lazy {
     }
 }
 
+// 설정 오류·브로커 연결 실패 때 상태 줄 아래에 띄우는 안내 카드. 상세 원인과 두 가지 해결 경로를 준다.
+@Composable
+private fun ConnectionProblemCard(message: String, onRetry: () -> Unit, onOpenPairing: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.lg),
+        colors = CardDefaults.cardColors(containerColor = SpotifySurface),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(Spacing.lg)) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = RadioOnAirRed,
+            )
+            Spacer(Modifier.height(Spacing.md))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                OutlinedButton(
+                    onClick = onRetry,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = SpotifyTextPrimary),
+                ) {
+                    Text("다시 연결")
+                }
+                Spacer(Modifier.width(Spacing.md))
+                Button(
+                    onClick = onOpenPairing,
+                    colors = ButtonDefaults.buttonColors(containerColor = SpotifyGreen, contentColor = RadioBgDeep),
+                ) {
+                    Text("페어링 다시 하기", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun StatusLine(status: GuestStatus, isBusy: Boolean, onOpenPairing: () -> Unit) {
     val dotColor = when (status) {
         GuestStatus.Live -> SpotifyGreen
         is GuestStatus.Stale, GuestStatus.NoStateYet -> Color(0xFFE0B341)
         GuestStatus.Connecting -> SpotifyTextMuted
-        GuestStatus.Offline, GuestStatus.NotPaired, GuestStatus.Revoked -> RadioOnAirRed
+        is GuestStatus.HostSilent -> Color(0xFFE0B341)
+        GuestStatus.Offline, GuestStatus.NotPaired, GuestStatus.Revoked,
+        is GuestStatus.InvalidConfig, is GuestStatus.BrokerUnreachable -> RadioOnAirRed
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -501,7 +569,8 @@ private fun NowPlayingHeader(state: HostState?, status: GuestStatus) {
         }
     }
     val isPlaying = state?.isPlaying == true
-    val dimmed = status is GuestStatus.Stale || status == GuestStatus.Offline
+    val dimmed = status is GuestStatus.Stale || status == GuestStatus.Offline || status is GuestStatus.HostSilent ||
+        status is GuestStatus.InvalidConfig || status is GuestStatus.BrokerUnreachable
 
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(

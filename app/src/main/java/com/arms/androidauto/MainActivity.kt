@@ -569,7 +569,9 @@ fun RadioPlayerScreen(repository: StationRepository, player: SessionAudioPlayer)
                 isNasPaused = !player.isPlaying()
             } else {
                 selectedStationId = currentId
-                playingStationId = currentId
+                // 세션이 오류로 멈춰 있으면 "재생 중"으로 그리지 않는다. 예전엔 세션 오류(Source error)를 무시해
+                // 59시간 무음인 태블릿이 "ON AIR"로 보였다(2026-10-06). 복구는 서비스가 백오프로 계속 시도한다.
+                playingStationId = if (player.hasError()) null else currentId
             }
             return@LaunchedEffect
         }

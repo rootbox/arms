@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 네트워크 복귀 시 재생 오류·리모컨 브로커 연결을 즉시 다시 시도 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- 원격 제어(호스트: 브로커 상시 연결·블루투스 출력 감시 / 게스트: QR 스캔) -->

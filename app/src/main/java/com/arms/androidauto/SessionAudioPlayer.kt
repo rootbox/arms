@@ -143,6 +143,8 @@ class SessionAudioPlayer(context: Context) : AudioPlayer {
     fun currentArtist(): String? = controller?.currentMediaItem?.mediaMetadata?.artist?.toString()
     fun currentArtworkUri(): String? = controller?.currentMediaItem?.mediaMetadata?.artworkUri?.toString()
     fun isIdle(): Boolean = controller?.playbackState == Player.STATE_IDLE
+    // 세션이 오류로 멈춰 있는가(서비스가 백오프로 복구를 시도하는 중일 수 있다).
+    fun hasError(): Boolean = controller?.playerError != null
     fun playWhenReady(): Boolean = controller?.playWhenReady == true
 
     // 앱을 열자마자 "이미 재생 중인가"를 판단하려면 컨트롤러 연결(비동기)을 잠깐 기다려야 한다.
