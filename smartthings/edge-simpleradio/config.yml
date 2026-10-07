@@ -1,0 +1,7 @@
+name: 'Simple Radio'
+packageKey: 'simpleradio-lan'
+permissions:
+  lan: {}
+  discovery: {}
+description: "SmartThings Edge LAN driver for the Simple Radio Android app (wall tablet host)"
+vendorSupportInformation: "https://github.com/rootbox/arms"

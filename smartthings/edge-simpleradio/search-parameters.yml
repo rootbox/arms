@@ -1,0 +1,2 @@
+mdns:
+  - service: "_simpleradio._tcp"
