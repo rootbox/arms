@@ -308,9 +308,12 @@ end
 --- Persist a newly discovered/resolved address. Returns true if it changed.
 function M.set_address(device, host)
   local changed = false
-  if host.ip and host.ip ~= device:get_field(fields.IP) then
+  -- 허브의 get_field는 없는 필드에 값을 아예 돌려주지 않을 수 있다(nil이 아니라 0개) → 바로
+  -- tostring()에 넘기면 "bad argument #1 (value expected)". 지역 변수에 받아 쓴다(실허브 2026-10-07).
+  local old_ip = device:get_field(fields.IP)
+  if host.ip and host.ip ~= old_ip then
     log.info(string.format("[Simple Radio %s] 주소 %s -> %s", tostring(device.label),
-      tostring(device:get_field(fields.IP)), host.ip))
+      tostring(old_ip), host.ip))
     device:set_field(fields.IP, host.ip, { persist = true })
     changed = true
   end
