@@ -178,3 +178,8 @@ tests/run.sh
 | driver e2e | 공식 `integration_test` 프레임워크로 `init.lua` 전체 구동: 발견→기기 생성, 명령→HTTP 요청, 새로고침→이벤트, 401→토큰 삭제 | lua_libs |
 
 가짜 태블릿만 따로 띄우기: `python3 tests/mock_host.py --port 8765 --pairing-open` (제어용 `/_mock/*` 엔드포인트는 파일 상단 설명 참고).
+
+## 실허브 배포 기록 (2026-10-07)
+- 채널 `rootbox-private`(DRIVER 타입, `edge:channels:create -i channel.json`에는 `"type":"DRIVER"` 필수), 허브 `스마트 홈 허브`(V4) 등록, 드라이버 설치.
+- 로그: `smartthings edge:drivers:logcat --all --hub-address <허브IP> --log-level DEBUG` (드라이버 id 지정+기본 레벨에서는 아무것도 안 보였음). 첫 접속의 인증서 신뢰 질문은 `expect`로 `y`.
+- 실허브에서만 드러난 버그: `get_field` 0개 반환 → `tostring` 인자 오류(세션 5초마다 재시작). 수정 후 페어링·SSE·명령 10종·재시작/재설치 유지 확인.

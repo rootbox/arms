@@ -46,3 +46,11 @@
 3. 진행 순서: 현재 원격 제어 실기기 검증 완료 후 P0 착수 제안.
 
 출처: SmartThings 개발자 문서(cloud-connected get-started·auth-server·schema-app·interaction-types), SmartThingsEdgeDrivers(sonos·matter-media 프로필), smartthings-core-sdk(virtualdevices), 커뮤니티(Supported Edge hubs, webhook SmartApp의 미래, PAT 변경, TV 허브).
+
+## 7. 진행 상태 (2026-10-07)
+- 결정: Edge LAN 드라이버 경로, 앱 내 기능, 양평 허브("스마트 홈 허브", V4, LAN/Edge 지원)만 사용, 끄기=라디오만 정지.
+- **구현 완료**: 앱 0.9.0-rc2(`feature/smartthings`, 호스트 로컬 제어 API v1 `smartthings/LAN_API.md` + 폰 리모컨에서 "스마트싱스 연결 허용"), Edge 드라이버 `smartthings/edge-simpleradio`(개인 채널 `rootbox-private`에 배포, 허브 설치).
+- **실허브 검증**: 주변 기기 검색 → "Simple Radio" 기기 생성 → 태블릿 허용 창에서 자동 페어링 → ONLINE(상태·프리셋 5개·곡 정보·커버). ST→태블릿 명령 10종(on/off/next/prev/volume/mute/unmute/preset/pause/play) 모두 반영, 상태 4초 내 동기화. **앱 강제 종료·재시작, 드라이버 재설치 뒤에도 재승인 없이 유지**(토큰은 태블릿 암호화 저장소와 허브 영구 필드에 보관). 창(10분)은 최초 토큰 발급에만 쓰인다.
+- 실허브에서 잡은 결함: `device:get_field`가 없는 필드에 값을 0개 돌려줘 `tostring()` 인자 오류로 세션이 5초마다 죽음(테스트 더블은 nil 반환이라 미검출) → 수정. 교훈: 허브 Lua API의 "값 없음"은 nil이 아닐 수 있다.
+- 관찰: 프리셋 전환 직후 볼륨이 27→13으로 바뀜(앱은 명령 외에 볼륨을 만지지 않음; 블루투스 수신기의 절대 볼륨 동기화로 추정, 추후 확인).
+- 남은 것: 폰(S25)에서 리모컨 "스마트싱스" 카드 실측 후 정식 v25, 빅스비·루틴 실사용 확인, 태블릿 MQTT 브로커 설정을 NAS로 전환(사용자 비밀번호 입력), 집 밖 커버 이미지(태블릿 LAN URL은 집 안에서만 보임).
