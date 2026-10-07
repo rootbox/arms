@@ -18,6 +18,9 @@ data class SessionSnapshot(
     val isPlaying: Boolean,
     val playbackState: Int,
     val artworkUri: String?,
+    // 로컬 제어 API의 power/playback 판단용(재생 의도·오류 복구 대기). MQTT HostState에는 쓰지 않는다.
+    val playWhenReady: Boolean = false,
+    val hasError: Boolean = false,
 ) {
     companion object {
         val EMPTY = SessionSnapshot(

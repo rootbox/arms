@@ -27,8 +27,8 @@ android {
         applicationId = "com.arms.androidauto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "0.8.2"
+        versionCode = 25
+        versionName = "0.9.0-rc1"
     }
 
     signingConfigs {
@@ -112,6 +112,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
+    // 단위 테스트(JVM)에서 android.jar의 org.json 스텁 대신 실제 구현을 쓴다(로컬 제어 API JSON).
+    testImplementation("org.json:json:20260522")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

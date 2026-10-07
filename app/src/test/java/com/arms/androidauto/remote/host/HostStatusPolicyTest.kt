@@ -102,4 +102,21 @@ class HostStatusPolicyTest {
         assertEquals(RemoteFailure.message(FailureKind.UNKNOWN), HostStatusPolicy.detail(HostStatus.Offline(null, 0L), nowMs = 0L))
         assertEquals("브로커 연결됨", HostStatusPolicy.detail(HostStatus.Ready(listOf(guest))))
     }
+
+    // 스마트싱스 로컬 제어만 하는 호스트(폰 리모컨 페어링 없음): 오류가 아니라 NoPairing.
+    @Test
+    fun noPairingIsNotAnErrorButNotRunningStillWins() {
+        assertEquals(
+            HostStatus.NoPairing,
+            HostStatusPolicy.compute(
+                running = true, configProblem = BrokerUrlPolicy.Problem.LOOPBACK, brokerState = ConnectionState.DISCONNECTED,
+                lastFailure = FailureKind.DNS, failingSinceMs = 1L, guests = emptyList(), attempt = 9, hasPairing = false,
+            ),
+        )
+        assertEquals(
+            HostStatus.NotRunning,
+            HostStatusPolicy.compute(false, null, ConnectionState.DISCONNECTED, null, null, emptyList(), 0, hasPairing = false),
+        )
+        assertEquals("폰 리모컨이 페어링되지 않았습니다.", HostStatusPolicy.detail(HostStatus.NoPairing))
+    }
 }

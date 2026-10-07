@@ -11,6 +11,10 @@
     <!-- 원격 제어(호스트: 브로커 상시 연결·블루투스 출력 감시 / 게스트: QR 스캔) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- 스마트싱스 로컬 제어(LAN_API.md): mDNS 질의를 화면이 꺼진 동안에도 받도록 멀티캐스트 락을 잡는다.
+         일반 권한이라 선언만으로 허용되며, API 34+ connectedDevice 포그라운드 서비스의 전제 권한도 된다
+         (블루투스 권한 없이도 호스트 서비스가 로컬 제어용으로 뜰 수 있게). NsdManager 등록 자체는 권한이 필요 없다. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 재생을 멈추고 한동안 방치하면 시스템이 앱을 낮은 standby bucket으로 강등시켜,
@@ -54,7 +58,7 @@
             </intent-filter>
         </receiver>
 
-        <!-- 원격 제어 호스트: 역할이 "홈 플레이어"일 때만 기동. 구현: remote/host/RemoteHostService.kt -->
+        <!-- 원격 제어 호스트: 역할이 "홈 플레이어"일 때만 기동(폰 리모컨 MQTT + 스마트싱스 로컬 제어 API 포트 8765). 구현: remote/host/RemoteHostService.kt -->
         <service
             android:name=".remote.host.RemoteHostService"
             android:exported="false"

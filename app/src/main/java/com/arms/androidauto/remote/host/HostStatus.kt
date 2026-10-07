@@ -10,8 +10,11 @@ import com.arms.androidauto.core.remote.RemoteGuest
 // 2026-10-06 사고: 브로커에 한 번도 붙지 못한 채 4일간 "리모컨 대기 중"만 보였다. 이제
 // "설정 오류 / 연결 중 / 오프라인 / 준비됨(게스트 유무)"을 구분해 보여 준다.
 sealed class HostStatus {
-    // 호스트 서비스가 꺼져 있다(역할이 HOST가 아니거나 페어링 없음·권한 없음).
+    // 호스트 서비스가 꺼져 있다(역할이 HOST가 아니거나 권한 없음, 또는 페어링도 스마트싱스 연결도 없음).
     data object NotRunning : HostStatus()
+
+    // 서비스는 떠 있지만(스마트싱스 로컬 제어용) 폰 리모컨 페어링이 없다. 브로커에 붙지 않는다 — 오류가 아니다.
+    data object NoPairing : HostStatus()
 
     // 저장된 페어링의 브로커 주소가 정책상 쓸 수 없다(예: 127.0.0.1). 연결을 시도하지 않는다.
     data class InvalidConfig(val problem: BrokerUrlPolicy.Problem) : HostStatus()
@@ -41,8 +44,11 @@ object HostStatusPolicy {
         failingSinceMs: Long?,
         guests: List<RemoteGuest>,
         attempt: Int,
+        // 폰 리모컨 페어링(MQTT)이 있는지. 없으면 브로커 상태와 무관하게 NoPairing.
+        hasPairing: Boolean = true,
     ): HostStatus = when {
         !running -> HostStatus.NotRunning
+        !hasPairing -> HostStatus.NoPairing
         configProblem != null -> HostStatus.InvalidConfig(configProblem)
         brokerState == ConnectionState.CONNECTED -> HostStatus.Ready(guests)
         failingSinceMs == null || attempt <= CONNECTING_ATTEMPTS ->
@@ -53,6 +59,7 @@ object HostStatusPolicy {
     // 칩 메뉴 첫 줄·페어링 화면에 쓰는 한 줄 설명.
     fun detail(status: HostStatus, nowMs: Long = System.currentTimeMillis()): String = when (status) {
         HostStatus.NotRunning -> "리모컨 호스트가 꺼져 있습니다."
+        HostStatus.NoPairing -> "폰 리모컨이 페어링되지 않았습니다."
         is HostStatus.InvalidConfig -> BrokerUrlPolicy.message(status.problem)
         is HostStatus.Connecting ->
             status.lastFailure?.let { "다시 연결하는 중 · ${RemoteFailure.message(it)}" } ?: "브로커에 연결하는 중…"

@@ -45,6 +45,14 @@ import com.arms.androidauto.core.remote.RemoteFailure
 import com.arms.androidauto.core.remote.RemoteGuest
 import com.arms.androidauto.core.remote.RemoteItem
 import com.arms.androidauto.core.remote.RemoteMessage
+import com.arms.androidauto.local.CommandOutcome
+import com.arms.androidauto.local.DeviceInfo
+import com.arms.androidauto.local.LocalBackend
+import com.arms.androidauto.local.LocalCommand
+import com.arms.androidauto.local.LocalControl
+import com.arms.androidauto.local.LocalControlHost
+import com.arms.androidauto.local.LocalState
+import com.arms.androidauto.local.LocalStateMapper
 import com.arms.androidauto.remote.RemoteRole
 import com.arms.androidauto.remote.RemoteSettingsStore
 import com.google.common.util.concurrent.ListenableFuture
@@ -72,7 +80,10 @@ import kotlin.math.roundToInt
 
 // 원격 제어 호스트(벽걸이 태블릿). 플랜 §4.
 //
-// - 역할이 HOST이고 페어링이 있을 때만 산다(아니면 즉시 stopSelf).
+// - 역할이 HOST일 때 산다: 폰 리모컨 페어링(MQTT)이 있거나 스마트싱스 로컬 제어가 켜져 있으면(기본 켬).
+//   둘 다 아니면 즉시 stopSelf. 페어링이 없으면 브로커에 붙지 않고 status=NoPairing(오류 아님).
+// - 로컬 제어 API v1(smartthings/LAN_API.md): LocalControlHost가 포트 8765 HTTP 서버·mDNS를 띄우고,
+//   명령은 MQTT와 같은 execute 경로(세션 MediaController)로 실행한다. 상태는 200ms 디바운스로 SSE에 나간다.
 // - 브로커에 상시 연결(RemoteChannel/MqttRemoteTransport), 세션(ARMSMediaLibraryService)에는
 //   폰 화면과 똑같이 MediaController 하나로 붙는다(SessionAudioPlayer와 같은 경로 → 플레이어는 하나).
 // - 상태 publish: 지문(StatePublishPolicy)이 바뀌면 500ms debounce 뒤, 그리고 5분마다 하트비트.
@@ -125,6 +136,14 @@ class RemoteHostService : Service() {
     // 즉시 재시도 요청(네트워크 복구·retryNow) 카운터. 어느 스레드에서 올려도 된다.
     private val retryRequests = MutableStateFlow(0L)
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    // 폰 리모컨 페어링(MQTT)이 있는지. 없으면 로컬 제어만 한다.
+    private var hasPairing = false
+
+    // ---- 로컬 제어(스마트싱스) ----
+    private var localHost: LocalControlHost? = null
+    private val localState = MutableStateFlow(LocalState.EMPTY)
+    private var localDebounceJob: Job? = null
+    private val stationArtCache = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
 
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -137,19 +156,22 @@ class RemoteHostService : Service() {
     override fun onCreate() {
         super.onCreate()
         val store = RemoteSettingsStore(this)
-        val p = if (store.getRole() == RemoteRole.HOST) runCatching { store.getPairing() }.getOrNull() else null
-        if (p == null) {
-            Log.i("ARMS", "리모컨 호스트: 역할이 HOST가 아니거나 페어링 없음 → 종료")
+        val isHost = store.getRole() == RemoteRole.HOST
+        val p = if (isHost) runCatching { store.getPairing() }.getOrNull() else null
+        val localOn = isHost && store.smartThingsLocalEnabled
+        if (!isHost || (p == null && !localOn)) {
+            Log.i("ARMS", "리모컨 호스트: 역할이 HOST가 아니거나 페어링·스마트싱스 연결 모두 없음 → 종료")
             stopSelf()
             return
         }
         // 개발용 주소(127.0.0.1, adb reverse 전용)는 debug 빌드에서만 허용한다.
-        val problem = (BrokerUrlPolicy.check(p.brokerUrl, allowLoopback = BuildConfig.DEBUG) as? BrokerUrlPolicy.Result.Invalid)?.problem
-        if (!startInForeground(configError = problem != null)) {
+        val problem = p?.let { (BrokerUrlPolicy.check(it.brokerUrl, allowLoopback = BuildConfig.DEBUG) as? BrokerUrlPolicy.Result.Invalid)?.problem }
+        if (!startInForeground(configError = problem != null, hasPairing = p != null)) {
             stopSelf()
             return
         }
         pairing = p
+        hasPairing = p != null
         configProblem = problem
         running = true
         instance = this
@@ -157,7 +179,7 @@ class RemoteHostService : Service() {
         _brokerState.value = ConnectionState.DISCONNECTED
         _isRunning.value = true
         updateStatus()
-        Log.i("ARMS", "리모컨 호스트 시작 (pair ${p.pairId.take(4)}…)")
+        Log.i("ARMS", if (p != null) "리모컨 호스트 시작 (pair ${p.pairId.take(4)}…)" else "리모컨 호스트 시작 (페어링 없음 · 스마트싱스 로컬 제어만)")
 
         stationRepository = StationRepository(this)
         monitor = BluetoothOutputMonitor(this)
@@ -166,7 +188,9 @@ class RemoteHostService : Service() {
         registerBatteryReceiver()
         registerVolumeReceiver()
         connectController()
-        if (problem != null) {
+        if (p == null) {
+            // 폰 리모컨 페어링 없음: 브로커는 건드리지 않는다(로컬 제어만).
+        } else if (problem != null) {
             // 서비스는 살려 둔다(상단바 칩이 "리모컨 설정 오류"를 보여야 한다). 연결은 시도하지 않는다.
             Log.w("ARMS", "리모컨 호스트: 브로커 주소 사용 불가 ($problem)")
         } else {
@@ -177,6 +201,7 @@ class RemoteHostService : Service() {
         observeStations()
         observeBluetooth()
         startHeartbeat()
+        startLocalControl(store.localDeviceId())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -185,6 +210,9 @@ class RemoteHostService : Service() {
         if (running) {
             running = false
             debounceJob?.cancel()
+            localDebounceJob?.cancel()
+            localHost?.stop()
+            localHost = null
             batteryReceiver?.let { runCatching { unregisterReceiver(it) } }
             batteryReceiver = null
             volumeReceiver?.let { runCatching { unregisterReceiver(it) } }
@@ -228,7 +256,7 @@ class RemoteHostService : Service() {
 
     // ---- 포그라운드/알림 ----
 
-    private fun startInForeground(configError: Boolean): Boolean {
+    private fun startInForeground(configError: Boolean, hasPairing: Boolean): Boolean {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -244,10 +272,19 @@ class RemoteHostService : Service() {
         )
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_radio)
-            .setContentTitle(if (configError) "리모컨 설정 오류" else "리모컨 대기 중")
+            .setContentTitle(
+                when {
+                    configError -> "리모컨 설정 오류"
+                    hasPairing -> "리모컨 대기 중"
+                    else -> "홈 플레이어 대기 중"
+                },
+            )
             .setContentText(
-                if (configError) "앱의 리모컨 페어링 화면에서 브로커 주소를 다시 설정하세요"
-                else "폰의 리모컨으로 이 기기를 조작할 수 있습니다",
+                when {
+                    configError -> "앱의 리모컨 페어링 화면에서 브로커 주소를 다시 설정하세요"
+                    hasPairing -> "폰의 리모컨으로 이 기기를 조작할 수 있습니다"
+                    else -> "같은 와이파이의 스마트싱스에서 이 기기를 조작할 수 있습니다"
+                },
             )
             .setContentIntent(contentIntent)
             .setOngoing(true)
@@ -474,6 +511,7 @@ class RemoteHostService : Service() {
             failingSinceMs = failingSinceMs,
             guests = registry.guests,
             attempt = startAttempt,
+            hasPairing = hasPairing,
         )
     }
 
@@ -517,7 +555,8 @@ class RemoteHostService : Service() {
                 if (stream == -1 || stream == AudioManager.STREAM_MUSIC) requestPublish()
             }
         }
-        ContextCompat.registerReceiver(this, r, IntentFilter(VOLUME_CHANGED_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED)
+        val filter = IntentFilter(VOLUME_CHANGED_ACTION).apply { addAction(STREAM_MUTE_CHANGED_ACTION) }
+        ContextCompat.registerReceiver(this, r, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         volumeReceiver = r
     }
 
@@ -548,6 +587,8 @@ class RemoteHostService : Service() {
             isPlaying = c.isPlaying,
             playbackState = c.playbackState,
             artworkUri = md.artworkUri?.toString(),
+            playWhenReady = c.playWhenReady,
+            hasError = c.playerError != null,
         )
     }
 
@@ -562,6 +603,7 @@ class RemoteHostService : Service() {
     // 지문이 바뀌었으면 debounce 뒤 publish, forced면 즉시. 어느 스레드에서 불려도 main으로 옮긴다.
     private fun requestPublish(forced: Boolean = false) {
         if (!running) return
+        requestLocalUpdate()
         scope.launch {
             val now = System.currentTimeMillis()
             val state = buildState(now)
@@ -692,7 +734,7 @@ class RemoteHostService : Service() {
     private suspend fun execute(cmd: RemoteCommand): Pair<Boolean, String?> {
         if (cmd is RemoteCommand.Refresh) return true to null
         if (cmd is RemoteCommand.Volume) return setVolume(cmd.percent)
-        val c = controller ?: return false to "미디어 세션에 연결되지 않음"
+        val c = controller ?: return false to NO_SESSION
         return when (cmd) {
             RemoteCommand.Play -> play(c)
             RemoteCommand.Pause -> { c.pause(); true to null }
@@ -746,6 +788,123 @@ class RemoteHostService : Service() {
         }
     }
 
+    // ---- 로컬 제어(스마트싱스) ----
+
+    private fun startLocalControl(deviceId: String) {
+        localDeviceId = deviceId
+        val host = LocalControlHost(this, localBackend, scope, deviceId)
+        localHost = host
+        LocalControl.init(this)
+        scope.launch {
+            LocalControl.enabled.collect { on ->
+                if (on) {
+                    host.start()
+                    requestLocalUpdate()
+                } else {
+                    host.stop()
+                }
+            }
+        }
+    }
+
+    private fun isMuted(): Boolean {
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        return runCatching { am.isStreamMute(AudioManager.STREAM_MUSIC) }.getOrDefault(false)
+    }
+
+    private fun buildLocalState(nowMs: Long = System.currentTimeMillis()): LocalState =
+        LocalStateMapper.map(
+            snapshot(), stations, volumePercent(), isMuted(),
+            hasStationArt = { StationRepository.channelArtRes(it) != null },
+            nowMs = nowMs,
+        )
+
+    // 플레이어·채널 목록·볼륨·음소거가 바뀌면 200ms 모아서 상태를 갱신한다(SSE로 나감). 내용이 같으면 그대로 둔다.
+    private fun requestLocalUpdate() {
+        if (!running || localHost?.isStarted != true) return
+        scope.launch {
+            localDebounceJob?.cancel()
+            localDebounceJob = launch {
+                delay(LOCAL_DEBOUNCE_MS)
+                val next = buildLocalState()
+                if (!next.sameContentAs(localState.value)) localState.value = next
+            }
+        }
+    }
+
+    private val localBackend = object : LocalBackend {
+        override val states: StateFlow<LocalState> = localState.asStateFlow()
+
+        override suspend fun currentState(): LocalState = withContext(Dispatchers.Main.immediate) {
+            buildLocalState().also { if (!it.sameContentAs(localState.value)) localState.value = it }
+        }
+
+        override fun deviceInfo(): DeviceInfo = DeviceInfo(
+            id = localDeviceId,
+            name = LocalControl.displayName(),
+            model = Build.MODEL,
+            appVersion = BuildConfig.VERSION_NAME,
+        )
+
+        override suspend fun execute(command: LocalCommand): CommandOutcome = withContext(Dispatchers.Main.immediate) {
+            val outcome = executeLocal(command)
+            requestPublish()
+            outcome
+        }
+
+        override fun lanBaseUrl(): String? = localHost?.baseUrl()
+
+        override fun stationArtPng(stationId: String): ByteArray? {
+            stationArtCache[stationId]?.let { return it }
+            val res = StationRepository.channelArtRes(stationId) ?: return null
+            val bytes = runCatching { resources.openRawResource(res).use { it.readBytes() } }.getOrNull() ?: return null
+            stationArtCache[stationId] = bytes
+            return bytes
+        }
+    }
+
+    private var localDeviceId: String = ""
+
+    // 로컬 명령 → MQTT와 같은 실행 경로(execute/play/select/setVolume). main에서 부른다.
+    private suspend fun executeLocal(cmd: LocalCommand): CommandOutcome {
+        fun of(r: Pair<Boolean, String?>): CommandOutcome =
+            if (r.first) CommandOutcome.OK
+            else if (r.second == NO_SESSION) CommandOutcome.unavailable(NO_SESSION)
+            else CommandOutcome.failed(r.second ?: "실패")
+        return when (cmd) {
+            LocalCommand.On -> {
+                val c = controller ?: return CommandOutcome.unavailable(NO_SESSION)
+                if (c.isPlaying) CommandOutcome.OK else of(play(c))
+            }
+            // 라디오(플레이어)만 멈춘다. 화면·다른 기능은 건드리지 않는다.
+            LocalCommand.Off -> of(execute(RemoteCommand.Stop))
+            LocalCommand.Play -> of(execute(RemoteCommand.Play))
+            LocalCommand.Pause -> of(execute(RemoteCommand.Pause))
+            LocalCommand.Stop -> of(execute(RemoteCommand.Stop))
+            LocalCommand.Next -> of(execute(RemoteCommand.Next))
+            LocalCommand.Previous -> of(execute(RemoteCommand.Previous))
+            is LocalCommand.SetVolume -> of(execute(RemoteCommand.Volume(cmd.percent)))
+            LocalCommand.VolumeUp -> adjustVolume(AudioManager.ADJUST_RAISE)
+            LocalCommand.VolumeDown -> adjustVolume(AudioManager.ADJUST_LOWER)
+            LocalCommand.Mute -> adjustVolume(AudioManager.ADJUST_MUTE)
+            LocalCommand.Unmute -> adjustVolume(AudioManager.ADJUST_UNMUTE)
+            is LocalCommand.PlayPreset -> {
+                if (stations.none { it.id == cmd.id }) return CommandOutcome.badRequest("unknown preset")
+                of(execute(RemoteCommand.Select(cmd.id)))
+            }
+        }
+    }
+
+    private fun adjustVolume(direction: Int): CommandOutcome {
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return CommandOutcome.failed("오디오 서비스 없음")
+        return try {
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0)
+            CommandOutcome.OK
+        } catch (e: SecurityException) {
+            CommandOutcome.failed("볼륨 변경 권한 없음(방해 금지 모드)")
+        }
+    }
+
     private suspend fun ack(seq: Long, ok: Boolean, message: String?) {
         val ch = channel ?: return
         try {
@@ -761,6 +920,10 @@ class RemoteHostService : Service() {
         const val CHANNEL_ID = "remote_host"
         private const val NOTIFICATION_ID = 0x5248 // "RH"
         private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
+        // 음소거 변경(시스템 보호 브로드캐스트, 공개 상수 없음)
+        private const val STREAM_MUTE_CHANGED_ACTION = "android.media.STREAM_MUTE_CHANGED_ACTION"
+        private const val LOCAL_DEBOUNCE_MS = 200L
+        private const val NO_SESSION = "미디어 세션에 연결되지 않음"
         private const val GUEST_SWEEP_MS = 30_000L
         private const val REVOKE_TIMEOUT_MS = 2_000L
         private const val REVOKE_SETTLE_MS = 500L
@@ -787,17 +950,22 @@ class RemoteHostService : Service() {
 
         private fun intent(context: Context) = Intent(context, RemoteHostService::class.java)
 
-        // API 34+에서 connectedDevice 포그라운드 타입은 BLUETOOTH_CONNECT(런타임) 등이 있어야 시작된다.
+        // API 34+에서 connectedDevice 포그라운드 타입은 전제 권한이 하나 있어야 시작된다: BLUETOOTH_CONNECT(런타임)
+        // 또는 CHANGE_WIFI_MULTICAST_STATE 같은 일반 권한(매니페스트 선언만으로 허용). 후자 덕에 블루투스 권한을
+        // 아직 안 준 태블릿도 스마트싱스 로컬 제어용으로 서비스를 띄울 수 있다.
         fun hasForegroundPermission(context: Context): Boolean =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
-                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.CHANGE_WIFI_MULTICAST_STATE) == PackageManager.PERMISSION_GRANTED
 
-        fun isHostConfigured(store: RemoteSettingsStore): Boolean =
-            store.getRole() == RemoteRole.HOST && runCatching { store.getPairing() }.getOrNull() != null
+        // 서비스가 떠 있어야 하는지: 호스트 역할이고, 폰 리모컨 페어링이 있거나 스마트싱스 로컬 제어가 켜져 있으면.
+        fun shouldRun(store: RemoteSettingsStore): Boolean =
+            store.getRole() == RemoteRole.HOST &&
+                (runCatching { store.getPairing() }.getOrNull() != null || store.smartThingsLocalEnabled)
 
         fun start(context: Context) {
             if (!hasForegroundPermission(context)) {
-                Log.w("ARMS", "리모컨 호스트: BLUETOOTH_CONNECT 권한 없음 → 시작하지 않음")
+                Log.w("ARMS", "리모컨 호스트: 포그라운드 전제 권한 없음 → 시작하지 않음")
                 return
             }
             try {
@@ -830,11 +998,11 @@ class RemoteHostService : Service() {
             start(context)
         }
 
-        // 역할/페어링 상태에 맞춰 켜거나 끈다. 역할 변경·페어링 저장/해제·앱 시작 시 부른다.
+        // 역할/페어링/스마트싱스 설정에 맞춰 켜거나 끈다. 역할 변경·페어링 저장/해제·앱 시작 시 부른다.
         // RemoteSettingsStore 생성(암호화 저장소 열기)은 느릴 수 있으니 가능하면 백그라운드에서.
         fun syncWithRole(context: Context) {
             val store = RemoteSettingsStore(context)
-            if (isHostConfigured(store)) start(context) else stop(context)
+            if (shouldRun(store)) start(context) else stop(context)
         }
 
         // "연결 종료"/"페어링 해제": 게스트에게 revoked 상태를 한 번 알리고(≤2s), retained 상태를 지우고,
@@ -850,7 +1018,9 @@ class RemoteHostService : Service() {
                 revokeWithTemporaryChannel(store, pairing)
             }
             store.clearPairing()
+            // 서비스는 onCreate에서만 페어링을 읽는다 → 끄고, 스마트싱스 로컬 제어가 켜져 있으면 페어링 없이 다시 켠다.
             stop(context)
+            if (shouldRun(store)) start(context)
             Log.i("ARMS", "리모컨 호스트: 연결 종료 · 페어링 삭제")
         }
 

@@ -80,7 +80,33 @@ class RemoteSettingsStore(context: Context) {
         return id
     }
 
+    // ---- 스마트싱스 로컬 제어(로컬 제어 API v1, smartthings/LAN_API.md) ----
+
+    // 같은 와이파이의 SmartThings(Edge 드라이버)에서 이 기기를 조작하게 할지. 기본 켬(호스트일 때만 의미 있음).
+    var smartThingsLocalEnabled: Boolean
+        get() = prefs.getBoolean(KEY_LOCAL_ENABLED, true)
+        set(value) { prefs.edit().putBoolean(KEY_LOCAL_ENABLED, value).apply() }
+
+    // mDNS TXT의 id: 설치 단위로 고정된 UUID(비밀 아님). 앱을 지우면 바뀐다.
+    fun localDeviceId(): String {
+        val existing = prefs.getString(KEY_LOCAL_DEVICE_ID, null)
+        if (existing != null) return existing
+        val id = java.util.UUID.randomUUID().toString()
+        prefs.edit().putString(KEY_LOCAL_DEVICE_ID, id).apply()
+        return id
+    }
+
+    // 연결된 로컬 클라이언트 목록(JSON, 토큰은 SHA-256 해시만). 형식은 local/PairedClientCodec.
+    fun getLocalClientsJson(): String? = prefs.getString(KEY_LOCAL_CLIENTS, null)
+
+    fun saveLocalClientsJson(json: String) {
+        prefs.edit().putString(KEY_LOCAL_CLIENTS, json).apply()
+    }
+
     private companion object {
+        const val KEY_LOCAL_ENABLED = "smartthings_local_enabled"
+        const val KEY_LOCAL_DEVICE_ID = "local_device_id"
+        const val KEY_LOCAL_CLIENTS = "local_clients"
         const val KEY_ROLE = "role"
         const val KEY_PAIRING = "pairing"
         const val KEY_CLIENT_ID = "client_id"

@@ -85,6 +85,7 @@ import java.net.URI
 // - QR을 띄운 뒤 게스트가 Hello를 보내면(RemoteHostService.guests) QR을 즉시 걷고 "페어링 완료"를 보여준다.
 //   QR은 키를 담고 있으므로 게스트가 붙은 뒤에는 절대 화면에 남기지 않는다.
 // - 이전 페어링이 있는 상태에서 QR을 새로 만들면 이전 게스트에게 연결 종료를 알리고(revoked) 새 키로 바꾼다.
+// - 아래에 "스마트싱스 연결" 섹션(SmartThingsSection): 로컬 제어 켜기/끄기, 연결 허용(3분), 연결된 클라이언트 해제.
 // - 2026-10-06 사고 대응: 브로커 설정은 정책 검사(BrokerUrlPolicy) + 실제 접속 확인(BrokerProbe)을 통과해야
 //   저장된다. 저장된 주소가 정책상 못 쓰는 값이면(예: 127.0.0.1) 빨간 카드와 함께 폼을 강제로 연다.
 //   QR은 브로커에 실제로 붙은 것을 확인한 뒤에만 만든다(호스트 Ready, 또는 서비스가 없으면 BrokerProbe).
@@ -269,6 +270,8 @@ fun HostPairingScreen(store: RemoteSettingsStore, onDone: () -> Unit) {
                 onDone = onDone,
             )
         }
+        // 스마트싱스 로컬 제어는 브로커·폰 리모컨과 무관하게 쓸 수 있다(QR·완료 화면에서만 숨긴다).
+        if (fresh == null && pairedGuest == null) SmartThingsSection()
     }
 }
 
@@ -477,7 +480,7 @@ private fun ReadyView(
                     "브로커 설정이 바뀌었습니다. QR을 새로 만들어야 폰과 이 기기가 새 주소로 연결됩니다.",
                     color = RadioOnAirRed, style = MaterialTheme.typography.bodySmall,
                 )
-            } else if (hostStatus !is HostStatus.NotRunning) {
+            } else if (hostStatus !is HostStatus.NotRunning && hostStatus !is HostStatus.NoPairing) {
                 Text(
                     "상태: ${HostStatusPolicy.detail(hostStatus)}",
                     color = if (hostStatus is HostStatus.Ready) RadioOnDarkMuted else RadioOnAirRed,
