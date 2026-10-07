@@ -46,3 +46,13 @@ mosquitto_passwd -c /mosquitto/config/passwd <계정이름>
 - 브로커가 보는 것은 `sr/<pairId>/{state,cmd,ack}` 토픽 이름과 암호문뿐이다. 키는 QR로만 오간다.
 - 계정 비밀번호를 바꾸면 양쪽 앱에서 페어링을 해제하고 다시 QR 페어링한다(페어링에 계정이 들어 있다).
 - 로그는 `log/mosquitto.log`(에러·경고만).
+
+## 실제 구축 기록 (2026-10-07)
+- Container Manager 프로젝트 `sr-mqtt`(`docker-compose.inline.yml`, 파일 업로드 없이 인라인 작성). 포트 `127.0.0.1:18831→9001`, 데이터는 Docker 볼륨 `sr_mqtt_data`.
+- 리버스 프록시 `sr-mqtt`: `https://mqtt.1319.space:443` → `http://localhost:18831`, WebSocket 사용자 지정 헤더, 보내기/읽기 시간 제한 300초.
+- DNS: Squarespace에서 `mqtt` A 211.208.166.136 (사용자 추가).
+- **방화벽(중요)**: 기본 프로필이 "대한민국 허용 / 나머지 거부"라 Let's Encrypt 검증이 실패했다 → TCP 80 전체 허용 규칙을 맨 위에 추가(사용자). 이 규칙이 없으면 다른 인증서(nyan·talk·traffic 등) 자동 갱신도 실패한다. 브로커(443)는 국내에서만 접속된다.
+- 인증서: Let's Encrypt `mqtt.1319.space`(만료 2027-01-05), 인증서 → 설정에서 `mqtt.1319.space` 서비스에 바인딩.
+- 비밀번호: Mac `~/.sr-mqtt-cred`(600)에서 생성, DSM YAML의 `MQTT_PASSWORD: ""` 한 곳에만 사용자가 붙여넣음. 채팅·저장소에 없음.
+- 교차 검증 `tools/broker-verify/verify.sh --cred-file ~/.sr-mqtt-cred`: 8/8 PASS(DNS, LE, WS 101, 익명·틀린 비밀번호 거부, 접속 291 ms·왕복 36 ms, ACL, retained).
+- 주의: 프로젝트가 실행 중이면 YAML이 읽기 전용이다. 편집하려면 중지 → 수정 → "변경 사항만 저장" 또는 빌드.
