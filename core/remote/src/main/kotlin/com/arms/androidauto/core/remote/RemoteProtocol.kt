@@ -26,6 +26,9 @@ sealed class RemoteCommand {
     data class Hello(val guestName: String) : RemoteCommand()
     // 리모컨 화면을 닫을 때. 못 보내도 호스트는 lastSeen 만료(3분)로 정리한다.
     object Bye : RemoteCommand()
+    // 호스트의 스마트싱스 "연결 허용" 창(10분)을 연다. 태블릿을 만지지 않고 폰에서 SmartThings 페어링을 시작하기 위한 것.
+    // 인자는 없다. 창이 열려 있는 동안만 로컬 /pair가 토큰을 발급하고, 첫 발급 뒤 바로 닫힌다.
+    object OpenSmartThingsPairing : RemoteCommand()
 }
 
 // 호스트에 붙어 있는 게스트(게스트 이름 + 마지막 인사 시각).
@@ -62,6 +65,10 @@ data class HostState(
     val guests: List<RemoteGuest> = emptyList(),
     // 호스트가 "연결 종료"를 눌렀다: 게스트는 이 상태를 받으면 페어링을 지우고 안내한다.
     val revoked: Boolean = false,
+    // 스마트싱스 "연결 허용" 창이 열려 있으면 닫히는 시각(epoch ms), 닫혀 있으면 null. 게스트가 카운트다운을 그린다.
+    val stPairingOpenUntilMs: Long? = null,
+    // 연결된(토큰을 받은) 스마트싱스 클라이언트 수. 이름·주소는 담지 않는다.
+    val stClientCount: Int = 0,
 )
 
 sealed class RemoteMessage {

@@ -58,7 +58,8 @@ object LocalControl {
         return a
     }
 
-    // "연결 허용 (3분)": 이 동안만 /pair가 토큰을 발급한다. 첫 발급 뒤 바로 닫힌다. 닫히는 시각(elapsedRealtime)을 돌려준다.
+    // "연결 허용 (10분)": 이 동안만 /pair가 토큰을 발급한다. 첫 발급 뒤 바로 닫힌다. 닫히는 시각(elapsedRealtime)을 돌려준다.
+    // 태블릿 화면(HostStatusChip·SmartThingsSection)과 폰 리모컨(st_pair → RemoteHostService) 모두 이 창을 연다.
     fun openPairingWindow(): Long = pairingWindow.open()
 
     fun closePairingWindow() = pairingWindow.close()

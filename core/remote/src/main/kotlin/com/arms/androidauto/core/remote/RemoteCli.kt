@@ -15,13 +15,15 @@ import kotlin.system.exitProcess
 // 실제 브로커를 상대로 한 통합 테스트용 CLI. 앱 코드 없이 호스트/게스트를 흉내낸다.
 //   ./gradlew :core:remote:cli --args="gen --broker wss://host/mqtt --user u --pass p"
 //   ./gradlew :core:remote:cli --args="host --pairing SR1.... [--revoke-after <sec>]"
-//   ./gradlew :core:remote:cli --args="guest --pairing SR1.... [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|hello|bye|select:<mediaId>|volume:<0..100>]"
+//   ./gradlew :core:remote:cli --args="guest --pairing SR1.... [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|hello|bye|st_pair|select:<mediaId>|volume:<0..100>]"
 // 게스트는 구독 직후 Hello("cli-guest")를, 종료 직전 Bye를 보낸다. 호스트는 Hello로 게스트 목록을 관리한다(3분 만료).
 // 사용자가 넘긴 값(페어링 텍스트 등) 외의 비밀은 출력하지 않는다.
 private const val CLI_GUEST_NAME = "cli-guest"
 private const val GUEST_EXPIRY_MS = 3 * 60_000L
 private const val HOST_PERIOD_MS = 10_000L
 private const val GUEST_LISTEN_MS = 15_000L
+// 호스트 시뮬레이터의 스마트싱스 "연결 허용" 창 길이(앱의 PairingWindow.DEFAULT_DURATION_MS와 같다).
+private const val ST_PAIRING_WINDOW_MS = 10 * 60_000L
 
 fun main(args: Array<String>) {
     if (args.isEmpty()) usage()
@@ -41,7 +43,7 @@ private fun usage(): Nothing {
         usage:
           gen   --broker <url> --user <u> --pass <p>
           host  --pairing <qrtext> [--revoke-after <sec>]
-          guest --pairing <qrtext> [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|hello|bye|select:<mediaId>|volume:<0..100>]
+          guest --pairing <qrtext> [--cmd play|pause|stop|next|prev|refresh|bt_reconnect|hello|bye|st_pair|select:<mediaId>|volume:<0..100>]
         """.trimIndent(),
     )
     exitProcess(2)
@@ -91,6 +93,7 @@ private fun parseCommand(text: String): RemoteCommand? = when {
     text == "bt_reconnect" -> RemoteCommand.BtReconnect
     text == "hello" -> RemoteCommand.Hello(CLI_GUEST_NAME)
     text == "bye" -> RemoteCommand.Bye
+    text == "st_pair" -> RemoteCommand.OpenSmartThingsPairing
     text.startsWith("select:") -> text.removePrefix("select:").takeIf { it.isNotBlank() }?.let { RemoteCommand.Select(it) }
     text.startsWith("volume:") -> text.removePrefix("volume:").toIntOrNull()?.takeIf { it in 0..100 }?.let { RemoteCommand.Volume(it) }
     else -> null
@@ -106,6 +109,7 @@ private fun describe(command: RemoteCommand): String = when (command) {
     RemoteCommand.Bye -> "bye"
     is RemoteCommand.Hello -> "hello:${command.guestName}"
     RemoteCommand.BtReconnect -> "bt_reconnect"
+    RemoteCommand.OpenSmartThingsPairing -> "st_pair"
     is RemoteCommand.Select -> "select:${command.mediaId}"
     is RemoteCommand.Volume -> "volume:${command.percent}"
 }
@@ -158,6 +162,9 @@ private fun runHost(opts: Map<String, String>) {
     var playing = false
     var volume = 50
     var btConnected = true
+    // 스마트싱스 연결 허용 창(epoch ms 마감)과 연결된 클라이언트 수. st_pair로 열리고 10분 뒤 닫힌다.
+    var stPairingOpenUntilMs: Long? = null
+    val stClientCount = 0
 
     fun currentState(revoked: Boolean = false) = HostState(
         mediaId = items[index].mediaId,
@@ -173,6 +180,8 @@ private fun runHost(opts: Map<String, String>) {
         volumePercent = volume,
         guests = guests.snapshot(),
         revoked = revoked,
+        stPairingOpenUntilMs = stPairingOpenUntilMs?.takeIf { it > System.currentTimeMillis() },
+        stClientCount = stClientCount,
     )
 
     fun printGuests() = println("host: guests=${guests.describe(System.currentTimeMillis())}")
@@ -213,6 +222,10 @@ private fun runHost(opts: Map<String, String>) {
                     // Bye에는 이름이 없다(계약). CLI 호스트는 게스트가 하나뿐이라고 보고 cli-guest를 지운다.
                     RemoteCommand.Bye -> guestsChanged = guests.bye(CLI_GUEST_NAME)
                     RemoteCommand.BtReconnect -> btConnected = true
+                    RemoteCommand.OpenSmartThingsPairing -> {
+                        stPairingOpenUntilMs = System.currentTimeMillis() + ST_PAIRING_WINDOW_MS
+                        note = "${ST_PAIRING_WINDOW_MS / 60_000} min"
+                    }
                     is RemoteCommand.Select -> {
                         val i = items.indexOfFirst { it.mediaId == c.mediaId }
                         if (i >= 0) index = i else { ok = false; note = "unknown mediaId" }
@@ -277,7 +290,8 @@ private fun runGuest(opts: Map<String, String>) {
                     "guest: state title=${s.title} artist=${s.artist} playing=${s.isPlaying} " +
                         "pb=${s.playbackState} bt=${s.bluetooth?.connected}/${s.bluetooth?.deviceName} " +
                         "battery=${s.batteryPercent} volume=${s.volumePercent} items=${s.items.size} " +
-                        "guests=${s.guests.map { it.name }} revoked=${s.revoked} updatedAt=${s.updatedAtMs}",
+                        "guests=${s.guests.map { it.name }} revoked=${s.revoked} " +
+                        "stPairingOpenUntil=${s.stPairingOpenUntilMs} stClients=${s.stClientCount} updatedAt=${s.updatedAtMs}",
                 )
                 if (s.revoked) revoked.complete(Unit)
             }

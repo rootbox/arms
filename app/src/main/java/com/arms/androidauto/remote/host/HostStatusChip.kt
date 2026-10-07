@@ -48,7 +48,7 @@ import kotlinx.coroutines.launch
 // - Ready·게스트 없음: "리모컨 대기 중"(흐리게) — 브로커에 붙어 있어도 게스트가 없으면 "연결됨"이라 하지 않는다.
 // - Ready·게스트 있음: "<이름> 연결됨"(강조), 여럿이면 "<첫 이름> 외 n대 연결됨".
 // 탭하면 메뉴: 첫 줄은 상태 설명(누를 수 없음), "지금 다시 연결"(Ready가 아닐 때), "페어링 QR 보기/만들기",
-// "연결 종료"(확인 후 RemoteHostService.revokeAndUnpair), "스마트싱스 연결 허용"(3분 창, LocalControl).
+// "연결 종료"(확인 후 RemoteHostService.revokeAndUnpair), "스마트싱스 연결 허용"(10분 창, LocalControl — 폰 리모컨의 st_pair도 같은 창을 연다).
 // - NoPairing(폰 리모컨 페어링 없이 스마트싱스 로컬 제어만): "리모컨 미연결"(흐리게, 오류 아님). "연결 종료"는 숨긴다.
 // - 스마트싱스 연결 허용 창이 열려 있으면 "스마트싱스 연결 허용 m:ss"가 우선한다.
 // 서비스 상태는 companion StateFlow만 본다(바인드 없음).
@@ -136,7 +136,7 @@ fun HostStatusChip(store: RemoteSettingsStore, onOpenPairing: () -> Unit) {
                     onClick = {
                         menuOpen = false
                         LocalControl.openPairingWindow()
-                        Toast.makeText(context, "3분 동안 스마트싱스 연결을 허용합니다", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "${pairingWindowMinutes()}분 동안 스마트싱스 연결을 허용합니다", Toast.LENGTH_SHORT).show()
                     },
                 )
             }
@@ -188,6 +188,9 @@ private fun chipLook(status: HostStatus): ChipLook = when (status) {
         else ChipLook("리모컨 대기 중", RadioOnDarkMuted, emphasized = false)
     }
 }
+
+// 스마트싱스 연결 허용 창 길이(분). 버튼·토스트 문구가 PairingWindow.DEFAULT_DURATION_MS를 따라가게 한다.
+internal fun pairingWindowMinutes(): Long = LocalControl.pairingWindow.durationMs / 60_000L
 
 // 남은 시간 "m:ss". 초는 올림(남아 있는 동안 0:00이 보이지 않게).
 internal fun formatCountdown(ms: Long): String {

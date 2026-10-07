@@ -124,7 +124,7 @@ end
 
 function Session:hint()
   self.last_hint_at = now()
-  self:log("warn", "페어링 대기 중: %s (3분 안에 연결 허용 창이 열려 있어야 합니다)", M.PAIR_HINT)
+  self:log("warn", "페어링 대기 중: %s (10분 안에 연결 허용 창이 열려 있어야 합니다)", M.PAIR_HINT)
 end
 
 --- Obtain a token. Returns the token, or nil if stopped.

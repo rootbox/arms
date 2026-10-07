@@ -24,6 +24,7 @@ class JsonRemoteCodecTest {
         RemoteCommand.Hello("Galaxy S25"),
         RemoteCommand.Hello("a".repeat(40)),
         RemoteCommand.Bye,
+        RemoteCommand.OpenSmartThingsPairing,
     )
 
     private val fullState = HostState(
@@ -290,6 +291,9 @@ class JsonRemoteCodecTest {
         assertNull(decoded.state.volumePercent)
         assertEquals(emptyList<RemoteGuest>(), decoded.state.guests)
         assertEquals(false, decoded.state.revoked)
+        // 스마트싱스 키도 없음 → 닫힘·0대.
+        assertNull(decoded.state.stPairingOpenUntilMs)
+        assertEquals(0, decoded.state.stClientCount)
     }
 
     @Test
@@ -297,5 +301,72 @@ class JsonRemoteCodecTest {
         // 게스트 없음·revoked=false·volume null 이면 새 키를 아예 쓰지 않는다(구 게스트 호환).
         val json = JSONObject(codec.encode(RemoteMessage.State(1, 2, fullState)))
         assertTrue(!json.has("guests") && !json.has("revoked") && !json.has("volumePercent"))
+        assertTrue(!json.has("stPairingOpenUntilMs") && !json.has("stClientCount"))
+    }
+
+    // ---- st_pair · stPairingOpenUntilMs/stClientCount ----
+
+    private val stState = fullState.copy(stPairingOpenUntilMs = 1_700_000_600_000L, stClientCount = 2)
+
+    @Test
+    fun `st_pair round trips as a simple command`() {
+        val msg = RemoteMessage.Command(seq = 21, sentAtMs = 22, command = RemoteCommand.OpenSmartThingsPairing)
+        val text = codec.encode(msg)
+        assertEquals(msg, codec.decode(text))
+        val json = JSONObject(text)
+        assertEquals("st_pair", json.getString("cmd"))
+        assertEquals(setOf("v", "t", "seq", "ts", "cmd"), json.keySet())
+        assertEquals(RemoteCommand.OpenSmartThingsPairing, (codec.decode(cmdJson("st_pair")) as RemoteMessage.Command).command)
+    }
+
+    @Test
+    fun `st_pair with any argument is rejected`() {
+        assertNull(codec.decode(cmdJson("st_pair") { it.put("mediaId", "station:1") }))
+        assertNull(codec.decode(cmdJson("st_pair") { it.put("percent", 10) }))
+        assertNull(codec.decode(cmdJson("st_pair") { it.put("guestName", "Galaxy") }))
+        assertNull(codec.decode(cmdJson("st_pair") { it.put("durationMs", 600_000L) }))
+    }
+
+    @Test
+    fun `state with smartthings pairing fields round trips`() {
+        val msg = RemoteMessage.State(seq = 44, sentAtMs = 9_997L, state = stState)
+        val text = codec.encode(msg)
+        val json = JSONObject(text)
+        assertEquals(1_700_000_600_000L, json.getLong("stPairingOpenUntilMs"))
+        assertEquals(2, json.getInt("stClientCount"))
+        assertEquals(msg, codec.decode(text))
+
+        // 창은 닫혔지만 클라이언트는 있는 경우: until 키만 생략된다.
+        val closed = RemoteMessage.State(1, 2, stState.copy(stPairingOpenUntilMs = null))
+        val closedJson = JSONObject(codec.encode(closed))
+        assertTrue(!closedJson.has("stPairingOpenUntilMs") && closedJson.getInt("stClientCount") == 2)
+        assertEquals(closed, codec.decode(closedJson.toString()))
+    }
+
+    @Test
+    fun `smartthings fields with bad values are rejected`() {
+        fun mutate(block: (JSONObject) -> Unit): String =
+            JSONObject(codec.encode(RemoteMessage.State(1, 2, stState))).also(block).toString()
+        assertNull(codec.decode(mutate { it.put("stClientCount", -1) }))
+        assertNull(codec.decode(mutate { it.put("stClientCount", 65) }))
+        assertNull(codec.decode(mutate { it.put("stClientCount", "2") }))
+        assertNull(codec.decode(mutate { it.put("stPairingOpenUntilMs", -5L) }))
+        assertNull(codec.decode(mutate { it.put("stPairingOpenUntilMs", "soon") }))
+        assertNull(codec.decode(mutate { it.put("stPairingOpenUntilMs", true) }))
+        // 경계값은 허용.
+        assertNotNull(codec.decode(mutate { it.put("stClientCount", 0) }))
+        assertNotNull(codec.decode(mutate { it.put("stClientCount", 64) }))
+        assertNotNull(codec.decode(mutate { it.put("stPairingOpenUntilMs", 0L) }))
+    }
+
+    @Test
+    fun `state json without smartthings keys decodes with defaults`() {
+        // 구 호스트가 보낸 state(volume·guests는 있고 st 키는 없음)도 그대로 받는다.
+        val json = JSONObject(codec.encode(RemoteMessage.State(1, 2, presenceState)))
+        assertTrue(!json.has("stPairingOpenUntilMs") && !json.has("stClientCount"))
+        val decoded = codec.decode(json.toString()) as RemoteMessage.State
+        assertNull(decoded.state.stPairingOpenUntilMs)
+        assertEquals(0, decoded.state.stClientCount)
+        assertEquals(presenceState, decoded.state)
     }
 }

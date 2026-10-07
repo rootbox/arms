@@ -144,27 +144,36 @@ class LocalAuth(
     }
 }
 
-// "연결 허용" 창. 열린 동안(기본 3분)만 /pair가 토큰을 발급하고, 첫 발급 뒤 바로 닫힌다.
+// "연결 허용" 창. 열린 동안(기본 10분)만 /pair가 토큰을 발급하고, 첫 발급 뒤 바로 닫힌다.
 // clock은 단조 시계(Android: SystemClock.elapsedRealtime) — 벽시계 변경에 흔들리지 않게.
+// wallClock은 게스트(폰)에게 보낼 마감 시각(epoch ms)용. 열 때 한 번만 계산해 두므로 상태 지문이 흔들리지 않는다.
 class PairingWindow(
     private val clock: () -> Long,
     val durationMs: Long = DEFAULT_DURATION_MS,
+    private val wallClock: () -> Long = System::currentTimeMillis,
 ) {
     private val _deadline = MutableStateFlow<Long?>(null)
     // 열려 있으면 닫히는 시각(clock 기준), 닫혀 있으면 null. 만료는 isOpen/remainingMs를 부를 때 반영된다.
     val deadline: StateFlow<Long?> = _deadline.asStateFlow()
+    private var wallDeadline: Long? = null
 
     @Synchronized
     fun open(): Long {
         val until = clock() + durationMs
+        wallDeadline = wallClock() + durationMs
         _deadline.value = until
         return until
     }
 
     @Synchronized
     fun close() {
+        wallDeadline = null
         _deadline.value = null
     }
+
+    // 열려 있으면 닫히는 시각(epoch ms), 닫혀 있거나 만료됐으면 null. MQTT HostState.stPairingOpenUntilMs에 그대로 싣는다.
+    @Synchronized
+    fun openUntilWallMs(): Long? = if (isOpen()) wallDeadline else null
 
     @Synchronized
     fun isOpen(): Boolean = remainingMs() > 0L
@@ -174,6 +183,7 @@ class PairingWindow(
         val until = _deadline.value ?: return 0L
         val left = until - clock()
         if (left <= 0L) {
+            wallDeadline = null
             _deadline.value = null
             return 0L
         }
@@ -185,11 +195,12 @@ class PairingWindow(
     fun <T> consume(block: () -> T): T? {
         if (!isOpen()) return null
         val result = block()
+        wallDeadline = null
         _deadline.value = null
         return result
     }
 
     companion object {
-        const val DEFAULT_DURATION_MS = 3 * 60_000L
+        const val DEFAULT_DURATION_MS = 10 * 60_000L
     }
 }

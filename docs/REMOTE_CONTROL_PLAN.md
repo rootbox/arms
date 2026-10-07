@@ -44,8 +44,8 @@
 - **저장**: 키·계정은 `EncryptedSharedPreferences`(NAS 자격증명과 동일). 채팅/로그/문서에 평문 노출 금지(기존 규칙 그대로).
 - **메시지**: `{v, type, seq, ts, body}`를 봉인. `seq` 단조 증가 + `ts` ±2분 창으로 재전송 방지. 복호 실패·창 밖 메시지는 조용히 폐기하고 카운트만 남긴다.
 - **정보 최소화(화이트리스트)**:
-  - cmd: `play`, `pause`, `stop`, `next`, `prev`, `select{mediaId}`, `bt_reconnect`, `refresh`, `volume{0..100}`(선택).
-  - state: `mediaId`, `title`, `artist`, `isPlaying`, `playbackState`, `artworkRef`(채널 아트 id 또는 공개 커버 URL — NAS 커버는 URL 대신 sid 없는 해시만), `bt{connected, deviceName}`, `battery%`, `updatedAt`.
+  - cmd: `play`, `pause`, `stop`, `next`, `prev`, `select{mediaId}`, `bt_reconnect`, `refresh`, `volume{0..100}`(선택), `hello{guestName}`, `bye`, `st_pair`(스마트싱스 연결 허용 창 10분 열기 — 인자 없음).
+  - state: `mediaId`, `title`, `artist`, `isPlaying`, `playbackState`, `artworkRef`(채널 아트 id 또는 공개 커버 URL — NAS 커버는 URL 대신 sid 없는 해시만), `bt{connected, deviceName}`, `battery%`, `updatedAt`, `volumePercent`, `guests[{name,lastSeenMs}]`, `revoked`, `stPairingOpenUntilMs`(창 마감 epoch ms, 닫혀 있으면 없음), `stClientCount`(연결된 스마트싱스 수 — 이름·주소는 없음).
   - 그 외(위치·네트워크·계정·NAS 자격증명·파일 목록)는 스키마에 존재하지 않는다. 스키마는 `core/remote`의 sealed class로 고정하고 직렬화 테스트로 필드 추가를 막는다.
 - **권한 분리**: 게스트는 호스트의 NAS 앨범을 *이름*으로만 고른다(`select{mediaId}`). 스트림 URL·sid는 호스트 안에서만 만들어진다.
 - **해제**: 양쪽 어디서든 "페어링 해제" → 키 삭제 + retained 상태 삭제(빈 메시지 publish).

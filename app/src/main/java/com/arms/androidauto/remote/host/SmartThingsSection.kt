@@ -48,7 +48,8 @@ import java.util.Locale
 
 // 호스트 설정 화면의 "스마트싱스 연결" 섹션(로컬 제어 API v1, smartthings/LAN_API.md).
 // - 켜기/끄기(기본 켬). 끄면 서버·mDNS를 내리고, 폰 리모컨 페어링도 없으면 호스트 서비스도 내려간다.
-// - "연결 허용 (3분)": 이 동안만 SmartThings Edge 드라이버가 토큰을 받는다(첫 연결 뒤 자동으로 닫힘).
+// - "연결 허용 (10분)": 이 동안만 SmartThings Edge 드라이버가 토큰을 받는다(첫 연결 뒤 자동으로 닫힘).
+//   폰 리모컨의 "스마트싱스" 카드(st_pair)도 같은 창을 연다 — 태블릿을 만지지 않아도 된다.
 // - 연결된 클라이언트 목록과 "해제"(토큰 삭제 + 열린 SSE 연결 끊기).
 @Composable
 fun SmartThingsSection() {
@@ -130,7 +131,7 @@ fun SmartThingsSection() {
                 onClick = { LocalControl.openPairingWindow() },
                 colors = ButtonDefaults.buttonColors(containerColor = SpotifyGreen, contentColor = RadioBgDeep),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("연결 허용 (3분)") }
+            ) { Text("연결 허용 (${pairingWindowMinutes()}분)") }
         }
         Text(
             "SmartThings 앱 → 기기 추가 → 주변 기기 검색 중에 이 버튼을 누르세요",

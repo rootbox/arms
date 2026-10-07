@@ -84,6 +84,8 @@ import kotlin.math.roundToInt
 //   둘 다 아니면 즉시 stopSelf. 페어링이 없으면 브로커에 붙지 않고 status=NoPairing(오류 아님).
 // - 로컬 제어 API v1(smartthings/LAN_API.md): LocalControlHost가 포트 8765 HTTP 서버·mDNS를 띄우고,
 //   명령은 MQTT와 같은 execute 경로(세션 MediaController)로 실행한다. 상태는 200ms 디바운스로 SSE에 나간다.
+//   폰 리모컨의 st_pair 명령은 스마트싱스 "연결 허용" 창(10분, LocalControl.openPairingWindow)을 연다 —
+//   태블릿을 만지지 않고 SmartThings 페어링을 시작하기 위한 것. 창 마감·연결된 클라이언트 수는 HostState로 나간다.
 // - 브로커에 상시 연결(RemoteChannel/MqttRemoteTransport), 세션(ARMSMediaLibraryService)에는
 //   폰 화면과 똑같이 MediaController 하나로 붙는다(SessionAudioPlayer와 같은 경로 → 플레이어는 하나).
 // - 상태 publish: 지문(StatePublishPolicy)이 바뀌면 500ms debounce 뒤, 그리고 5분마다 하트비트.
@@ -598,6 +600,9 @@ class RemoteHostService : Service() {
             volumePercent = volumePercent(),
             guests = registry.guests,
             revoked = revoked,
+            // 창을 열 때 한 번 정한 벽시계 마감(닫혔거나 만료면 null)과 연결된 스마트싱스 수. 둘 다 지문에 들어간다.
+            stPairingOpenUntilMs = LocalControl.pairingWindow.openUntilWallMs(),
+            stClientCount = LocalControl.pairedClients.value.size,
         )
 
     // 지문이 바뀌었으면 debounce 뒤 publish, forced면 즉시. 어느 스레드에서 불려도 main으로 옮긴다.
@@ -715,6 +720,19 @@ class RemoteHostService : Service() {
                 }
                 return
             }
+            RemoteCommand.OpenSmartThingsPairing -> {
+                // 폰에서 스마트싱스 "연결 허용" 창(10분)을 연다. 로컬 제어가 꺼져 있으면 서버도 없으니 거부.
+                if (!LocalControl.enabled.value) {
+                    ack(msg.seq, false, ST_DISABLED_MESSAGE)
+                    return
+                }
+                LocalControl.openPairingWindow()
+                Log.i("ARMS", "리모컨 호스트: 폰 요청으로 스마트싱스 연결 허용 창 열림 (${LocalControl.pairingWindow.durationMs / 60_000}분)")
+                ack(msg.seq, true, "${LocalControl.pairingWindow.durationMs / 60_000}분 동안 스마트싱스 연결을 허용합니다")
+                // 게스트가 카운트다운을 바로 보게 즉시 publish(지문도 바뀌지만 debounce를 기다리지 않는다).
+                requestPublish(forced = true)
+                return
+            }
             else -> Unit
         }
         val (ok, message) = try {
@@ -804,6 +822,21 @@ class RemoteHostService : Service() {
                     host.stop()
                 }
             }
+        }
+        // 연결 허용 창이 열리거나 닫히면(태블릿 UI·폰 st_pair·첫 페어링·끄기) 게스트에게 알린다.
+        // 열린 동안에는 만료 시각에 한 번 더 publish 해 게스트 카운트다운이 "닫힘"으로 정리되게 한다
+        // (만료는 remainingMs()를 부를 때 반영되므로 여기서 직접 깨운다).
+        scope.launch {
+            LocalControl.pairingWindow.deadline.collectLatest { deadline ->
+                requestPublish()
+                if (deadline == null) return@collectLatest
+                delay(LocalControl.pairingRemainingMs().coerceAtLeast(0L) + PAIRING_EXPIRY_SLACK_MS)
+                requestPublish()
+            }
+        }
+        // 스마트싱스 클라이언트가 붙거나(토큰 발급) 떨어지면(해제) 수가 바뀐다 → 지문이 바뀌어 publish.
+        scope.launch {
+            LocalControl.pairedClients.collect { requestPublish() }
         }
     }
 
@@ -924,6 +957,9 @@ class RemoteHostService : Service() {
         private const val STREAM_MUTE_CHANGED_ACTION = "android.media.STREAM_MUTE_CHANGED_ACTION"
         private const val LOCAL_DEBOUNCE_MS = 200L
         private const val NO_SESSION = "미디어 세션에 연결되지 않음"
+        private const val ST_DISABLED_MESSAGE = "스마트싱스 연결이 꺼져 있습니다"
+        // 창 만료 뒤 publish를 깨우는 여유(단조 시계·디바운스 오차).
+        private const val PAIRING_EXPIRY_SLACK_MS = 250L
         private const val GUEST_SWEEP_MS = 30_000L
         private const val REVOKE_TIMEOUT_MS = 2_000L
         private const val REVOKE_SETTLE_MS = 500L

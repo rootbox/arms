@@ -182,10 +182,25 @@ fun RemoteControlScreen(
     }
     // 블루투스 재연결처럼 결과 문구가 의미 있는 명령은 ack 메시지를 그대로 보여준다.
     var btAckMessage by remember { mutableStateOf<String?>(null) }
+    // 스마트싱스 연결 허용(st_pair)의 ack도 카드에 짧게 보여준다(거부 사유: "스마트싱스 연결이 꺼져 있습니다" 등).
+    var stAckMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(lastAckResult) {
         val result = lastAckResult ?: return@LaunchedEffect
         if (result.command is RemoteCommand.BtReconnect) {
             btAckMessage = result.ack.message ?: if (result.ack.ok) "재연결 요청을 보냈습니다" else "재연결 실패"
+        }
+        if (result.command is RemoteCommand.OpenSmartThingsPairing) {
+            stAckMessage = SmartThingsPairingPolicy.ackMessage(result.ack.ok, result.ack.message)
+        }
+    }
+    // 카운트다운용 시계: 창이 열려 있는 동안만 1초마다 돈다(nowMs는 30초 주기라 초 단위 표시에는 못 쓴다).
+    val stOpenUntilMs = hostState?.stPairingOpenUntilMs
+    var stNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(stOpenUntilMs) {
+        stNowMs = System.currentTimeMillis()
+        while (SmartThingsPairingPolicy.isOpen(stOpenUntilMs, stNowMs)) {
+            delay(SmartThingsPairingPolicy.TICK_MS)
+            stNowMs = System.currentTimeMillis()
         }
     }
 
@@ -266,6 +281,19 @@ fun RemoteControlScreen(
                     onReconnect = {
                         btAckMessage = null
                         client.send(RemoteCommand.BtReconnect)
+                    },
+                )
+                Spacer(Modifier.height(Spacing.xl))
+            }
+            item(key = "smartthings") {
+                SmartThingsCard(
+                    state = hostState,
+                    nowMs = stNowMs,
+                    canSend = canSend,
+                    ackMessage = stAckMessage,
+                    onOpenPairing = {
+                        stAckMessage = null
+                        client.openSmartThingsPairing()
                     },
                 )
                 Spacer(Modifier.height(Spacing.xl))
@@ -753,6 +781,76 @@ private fun BluetoothCard(
                 ),
             ) {
                 Text("재연결")
+            }
+        }
+    }
+}
+
+// "스마트싱스" 카드: 연결된 스마트싱스 수와, 창이 닫혀 있으면 "연결 허용 (10분)" 버튼(→ st_pair),
+// 열려 있으면 "연결 허용 중 · m:ss 남음 — SmartThings 앱에서 기기 추가 → 주변 기기 검색" 카운트다운.
+// 태블릿을 만지지 않고 SmartThings 페어링을 시작하는 유일한 폰 쪽 진입점이다.
+@Composable
+private fun SmartThingsCard(
+    state: HostState?,
+    nowMs: Long,
+    canSend: Boolean,
+    ackMessage: String?,
+    onOpenPairing: () -> Unit,
+) {
+    val view = SmartThingsPairingPolicy.viewOf(state, nowMs)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(Radius.lg),
+        colors = CardDefaults.cardColors(containerColor = SpotifySurface),
+    ) {
+        Column(modifier = Modifier.padding(Spacing.lg)) {
+            Text(
+                text = "스마트싱스",
+                style = MaterialTheme.typography.titleSmall,
+                color = SpotifyTextPrimary,
+            )
+            Spacer(Modifier.height(Spacing.xs))
+            Text(
+                text = SmartThingsPairingPolicy.clientCountLabelOf(state),
+                style = MaterialTheme.typography.bodyMedium,
+                color = SpotifyTextPrimary,
+            )
+            if (ackMessage != null) {
+                Spacer(Modifier.height(Spacing.sm))
+                Text(
+                    text = ackMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = SpotifyTextMuted,
+                )
+            }
+            Spacer(Modifier.height(Spacing.md))
+            when (view) {
+                is SmartThingsPairingPolicy.View.Open -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(Spacing.sm)
+                                .clip(CircleShape)
+                                .background(SpotifyGreen),
+                        )
+                        Spacer(Modifier.width(Spacing.sm))
+                        Text(
+                            text = SmartThingsPairingPolicy.countdownLabel(view.remainingMs),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = SpotifyGreen,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                SmartThingsPairingPolicy.View.Closed -> {
+                    OutlinedButton(
+                        onClick = onOpenPairing,
+                        enabled = SmartThingsPairingPolicy.canOpen(canSend, state?.stPairingOpenUntilMs, nowMs),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = SpotifyGreen),
+                    ) {
+                        Text(SmartThingsPairingPolicy.OPEN_BUTTON_LABEL)
+                    }
+                }
             }
         }
     }

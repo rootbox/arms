@@ -128,6 +128,20 @@ class HostStateBuilderTest {
         assertNull(state.volumePercent)
         assertTrue(state.guests.isEmpty())
         assertFalse(state.revoked)
+        // 기본값: 스마트싱스 연결 허용 창 닫힘, 연결된 클라이언트 0대.
+        assertNull(state.stPairingOpenUntilMs)
+        assertEquals(0, state.stClientCount)
+    }
+
+    @Test
+    fun buildCarriesSmartThingsPairingWindowAndClientCount() {
+        val state = HostStateBuilder.build(radio(), stations, null, null, 1L, stPairingOpenUntilMs = 1_700_000_600_000L, stClientCount = 2)
+        assertEquals(1_700_000_600_000L, state.stPairingOpenUntilMs)
+        assertEquals(2, state.stClientCount)
+        // 창이 닫혀 있어도 클라이언트 수는 그대로, 음수 카운트는 0으로.
+        val closed = HostStateBuilder.build(radio(), stations, null, null, 1L, stPairingOpenUntilMs = null, stClientCount = -1)
+        assertNull(closed.stPairingOpenUntilMs)
+        assertEquals(0, closed.stClientCount)
     }
 
     @Test

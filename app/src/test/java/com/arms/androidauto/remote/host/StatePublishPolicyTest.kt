@@ -55,6 +55,8 @@ class StatePublishPolicyTest {
         assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(volumeBucket = 45), 1_000L, 2_000L))
         assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(guestNames = emptyList()), 1_000L, 2_000L))
         assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(revoked = true), 1_000L, 2_000L))
+        assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(stPairingOpenUntilMs = 9_000L), 1_000L, 2_000L))
+        assertEquals(PublishDecision.Debounced, policy.decide(playing, playing.copy(stClientCount = 1), 1_000L, 2_000L))
     }
 
     @Test
@@ -153,6 +155,21 @@ class StatePublishPolicyTest {
         val revoked = StatePublishPolicy.fingerprintOf(state().copy(revoked = true))
         assertNotEquals(a, revoked)
         assertTrue(revoked.revoked)
+    }
+
+    @Test
+    fun fingerprintTracksSmartThingsPairingWindowAndClientCount() {
+        val closed = StatePublishPolicy.fingerprintOf(state())
+        assertNull(closed.stPairingOpenUntilMs)
+        assertEquals(0, closed.stClientCount)
+        // 창이 열리면(마감 시각이 생기면) publish, 같은 마감이면 다시 publish 하지 않는다.
+        val open = StatePublishPolicy.fingerprintOf(state().copy(stPairingOpenUntilMs = 600_000L))
+        assertNotEquals(closed, open)
+        assertEquals(open, StatePublishPolicy.fingerprintOf(state(updatedAt = 5_000L).copy(stPairingOpenUntilMs = 600_000L)))
+        // 다시 열어 마감이 바뀌면 publish. 클라이언트가 붙거나 떨어져도 publish.
+        assertNotEquals(open, StatePublishPolicy.fingerprintOf(state().copy(stPairingOpenUntilMs = 700_000L)))
+        assertNotEquals(closed, StatePublishPolicy.fingerprintOf(state().copy(stClientCount = 1)))
+        assertEquals(1, StatePublishPolicy.fingerprintOf(state().copy(stClientCount = 1)).stClientCount)
     }
 
     @Test

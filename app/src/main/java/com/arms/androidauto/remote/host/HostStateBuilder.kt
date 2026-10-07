@@ -91,6 +91,10 @@ object HostStateBuilder {
         guests: List<RemoteGuest> = emptyList(),
         // "연결 종료" 알림. 게스트는 이걸 받으면 페어링을 지운다.
         revoked: Boolean = false,
+        // 스마트싱스 연결 허용 창이 열려 있으면 닫히는 시각(epoch ms). 게스트 카운트다운용.
+        stPairingOpenUntilMs: Long? = null,
+        // 연결된 스마트싱스 클라이언트 수(이름·주소는 내보내지 않는다).
+        stClientCount: Int = 0,
     ): HostState = HostState(
         mediaId = snapshot.mediaId,
         title = snapshot.title,
@@ -105,5 +109,7 @@ object HostStateBuilder {
         volumePercent = volumePercent?.coerceIn(0, 100),
         guests = guests,
         revoked = revoked,
+        stPairingOpenUntilMs = stPairingOpenUntilMs,
+        stClientCount = stClientCount.coerceAtLeast(0),
     )
 }

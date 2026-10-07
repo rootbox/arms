@@ -4,8 +4,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 // 메시지 ↔ JSON(평문, 봉인 전). 봉투: {"v":1,"t":"cmd"|"state"|"ack","seq":Long,"ts":Long, ...}
-// - cmd:   "cmd":"play|pause|stop|next|prev|refresh|bt_reconnect|select|volume", "mediaId"?(select), "percent"?(volume)
-// - state: HostState 필드 그대로("bluetooth" 객체, "items" 배열)
+// - cmd:   "cmd":"play|pause|stop|next|prev|refresh|bt_reconnect|select|volume|hello|bye|st_pair",
+//          "mediaId"?(select), "percent"?(volume), "guestName"?(hello)
+// - state: HostState 필드 그대로("bluetooth" 객체, "items"·"guests" 배열, "stPairingOpenUntilMs"·"stClientCount"는 기본값이면 생략)
 // - ack:   "ackSeq","ok","message"?
 // 화이트리스트: 허용된 키 외에 다른 최상위(또는 중첩 객체) 키가 하나라도 있으면 decode는 null.
 // 스키마 밖의 정보는 여기서 걸러지므로 게스트/호스트 어느 쪽도 "제어 외의 정보"를 받아들일 수 없다.
@@ -19,11 +20,14 @@ object JsonRemoteCodec : RemoteCodec {
     private val stateKeys = envelopeKeys + setOf(
         "mediaId", "title", "artist", "isPlaying", "playbackState", "artworkRef",
         "bluetooth", "batteryPercent", "updatedAtMs", "items", "volumePercent", "guests", "revoked",
+        "stPairingOpenUntilMs", "stClientCount",
     )
     private val guestKeys = setOf("name", "lastSeenMs")
     private val bluetoothKeys = setOf("connected", "deviceName", "changedAtMs")
     private val itemKeys = setOf("mediaId", "name", "subtitle")
     private val ackKeys = envelopeKeys + setOf("ackSeq", "ok", "message")
+    // 호스트의 LocalAuth.MAX_CLIENTS(8)보다 넉넉한 상한. 그 이상은 스키마 밖의 값으로 본다.
+    private const val MAX_ST_CLIENTS = 64
 
     private const val C_PLAY = "play"
     private const val C_PAUSE = "pause"
@@ -36,6 +40,7 @@ object JsonRemoteCodec : RemoteCodec {
     private const val C_VOLUME = "volume"
     private const val C_HELLO = "hello"
     private const val C_BYE = "bye"
+    private const val C_ST_PAIR = "st_pair"
 
     override fun encode(message: RemoteMessage): String {
         val json = JSONObject()
@@ -57,6 +62,7 @@ object JsonRemoteCodec : RemoteCodec {
                     is RemoteCommand.Volume -> json.put("cmd", C_VOLUME).put("percent", c.percent)
                     is RemoteCommand.Hello -> json.put("cmd", C_HELLO).put("guestName", c.guestName)
                     RemoteCommand.Bye -> json.put("cmd", C_BYE)
+                    RemoteCommand.OpenSmartThingsPairing -> json.put("cmd", C_ST_PAIR)
                 }
             }
             is RemoteMessage.State -> {
@@ -88,6 +94,9 @@ object JsonRemoteCodec : RemoteCodec {
                     },
                 )
                 if (s.revoked) json.put("revoked", true)
+                // 닫혀 있음(null)·0대는 키를 생략한다(구 게스트 호환 — 화이트리스트 밖 키는 거부되므로).
+                json.put("stPairingOpenUntilMs", s.stPairingOpenUntilMs)
+                if (s.stClientCount > 0) json.put("stClientCount", s.stClientCount)
                 json.put(
                     "items",
                     JSONArray().also { arr ->
@@ -182,6 +191,7 @@ object JsonRemoteCodec : RemoteCodec {
                     C_PREV -> RemoteCommand.Previous
                     C_REFRESH -> RemoteCommand.Refresh
                     C_BT_RECONNECT -> RemoteCommand.BtReconnect
+                    C_ST_PAIR -> RemoteCommand.OpenSmartThingsPairing
                     else -> null
                 }
             }
@@ -240,6 +250,10 @@ object JsonRemoteCodec : RemoteCodec {
             emptyList()
         }
         val revoked = if (json.has("revoked")) (json.requireBoolean("revoked") ?: return null) else false
+        val stPairingOpenUntilMs = json.optionalLong("stPairingOpenUntilMs") ?: return null
+        if (stPairingOpenUntilMs.value != null && stPairingOpenUntilMs.value < 0L) return null
+        val stClientCount = json.optionalInt("stClientCount") ?: return null
+        if (stClientCount.value != null && stClientCount.value !in 0..MAX_ST_CLIENTS) return null
         return HostState(
             mediaId = mediaId.value,
             title = title.value,
@@ -254,6 +268,8 @@ object JsonRemoteCodec : RemoteCodec {
             volumePercent = volumePercent.value,
             guests = guests,
             revoked = revoked,
+            stPairingOpenUntilMs = stPairingOpenUntilMs.value,
+            stClientCount = stClientCount.value ?: 0,
         )
     }
 

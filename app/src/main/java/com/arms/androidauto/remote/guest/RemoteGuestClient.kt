@@ -347,6 +347,9 @@ class RemoteGuestClient(
         }
     }
 
+    // "연결 허용 (10분)": 태블릿의 스마트싱스 연결 허용 창을 연다. ack(ok/메시지)는 lastAckResult로, 카운트다운은 hostState로 온다.
+    fun openSmartThingsPairing() = send(RemoteCommand.OpenSmartThingsPairing)
+
     // 볼륨 슬라이더에서 손을 뗐을 때. 앞선 명령의 ack를 기다리는 중이면 값만 기억해 두었다가 ack가 오면 마지막 값을 보낸다.
     fun setVolume(percent: Int) {
         val value = GuestStatusPolicy.clampVolume(percent)

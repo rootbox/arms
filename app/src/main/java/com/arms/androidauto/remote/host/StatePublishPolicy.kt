@@ -20,6 +20,10 @@ data class StateFingerprint(
     val volumeBucket: Int?,
     val guestNames: List<String>,
     val revoked: Boolean,
+    // 스마트싱스 연결 허용 창의 마감(열 때 한 번 정해진 epoch ms)과 연결된 클라이언트 수.
+    // 창이 열리거나 닫힐 때, 클라이언트가 붙거나 떨어질 때만 바뀌므로 그대로 지문에 넣는다.
+    val stPairingOpenUntilMs: Long? = null,
+    val stClientCount: Int = 0,
 )
 
 sealed class PublishDecision {
@@ -86,6 +90,8 @@ class StatePublishPolicy(
             volumeBucket = volumeBucket(state.volumePercent),
             guestNames = state.guests.map { it.name },
             revoked = state.revoked,
+            stPairingOpenUntilMs = state.stPairingOpenUntilMs,
+            stClientCount = state.stClientCount,
         )
     }
 }
