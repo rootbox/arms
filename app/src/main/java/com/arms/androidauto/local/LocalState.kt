@@ -20,12 +20,19 @@ data class LocalState(
     val muted: Boolean,
     val presets: List<LocalPreset>,
     val updatedAtMs: Long,
+    // 명령이 성공할 때마다 호스트가 올리는 번호(와이어에 안 나감). 내용이 그대로여도 이 번호가 바뀌면
+    // SSE는 상태를 한 번 더 보낸다 — 클라이언트(스마트싱스)의 낙관 반영을 호스트의 실제 상태로 덮기 위해.
+    val forceSeq: Long = 0L,
 ) {
     enum class Power(val wire: String) { ON("on"), OFF("off") }
     enum class Playback(val wire: String) { PLAYING("playing"), PAUSED("paused"), STOPPED("stopped"), BUFFERING("buffering") }
 
-    // updatedAtMs만 다른 상태는 "바뀌지 않음"(SSE로 다시 보내지 않는다).
-    fun sameContentAs(other: LocalState?): Boolean = other != null && copy(updatedAtMs = 0L) == other.copy(updatedAtMs = 0L)
+    // updatedAtMs·forceSeq만 다른 상태는 "바뀌지 않음"(디바운스 갱신은 이걸로 거른다).
+    fun sameContentAs(other: LocalState?): Boolean =
+        other != null && copy(updatedAtMs = 0L, forceSeq = 0L) == other.copy(updatedAtMs = 0L, forceSeq = 0L)
+
+    // SSE가 prev 다음에 이 상태를 보내야 하는지: 내용이 바뀌었거나 강제 push 번호가 올랐으면.
+    fun shouldEmitAfter(prev: LocalState?): Boolean = prev == null || forceSeq != prev.forceSeq || !sameContentAs(prev)
 
     companion object {
         val EMPTY = LocalState(

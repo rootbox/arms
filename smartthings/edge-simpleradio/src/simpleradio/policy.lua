@@ -5,7 +5,9 @@ local M = {}
 M.PAIR_INTERVAL_S = 10          -- POST /api/v1/pair every 10 s ...
 M.PAIR_WINDOW_S = 5 * 60        -- ... for up to 5 minutes
 M.DORMANT_INFO_POLL_S = 30      -- after that, check /info.pairingOpen every 30 s
-M.COMMAND_TIMEOUT_S = 5         -- POST /api/v1/command (host answers within 5 s)
+M.COMMAND_TIMEOUT_S = 8         -- POST /api/v1/command: must exceed the host's own 5 s execute
+                                -- budget so its 504 reaches us instead of a local timeout
+M.VERIFY_DELAY_S = 1.5          -- after a 2xx command, re-read GET /api/v1/state this much later
 M.REQUEST_TIMEOUT_S = 5         -- other short requests
 M.SSE_IDLE_TIMEOUT_S = 60       -- host pings every 25 s; 60 s of silence = dead stream
 M.POLL_INTERVAL_S = 10          -- GET /api/v1/state fallback polling

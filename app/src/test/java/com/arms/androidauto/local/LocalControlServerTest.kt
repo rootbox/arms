@@ -238,11 +238,13 @@ class LocalControlServerTest {
         }
     }
 
+    // 클라이언트(토큰)가 다르면 스트림도 따로 산다.
     @Test
     fun severalSseClientsAndCleanupOnDisconnect() {
-        val token = pair()
-        val a = openEvents(token)
-        val b = openEvents(token)
+        val tokenA = pair("허브 A")
+        val tokenB = pair("허브 B")
+        val a = openEvents(tokenA)
+        val b = openEvents(tokenB)
         nextStateEvent(a.second)
         nextStateEvent(b.second)
         waitUntil { server.sseClientCount == 2 }
@@ -252,6 +254,82 @@ class LocalControlServerTest {
         a.first.disconnect()
         waitUntil { server.sseClientCount == 1 }
         b.first.disconnect()
+        waitUntil { server.sseClientCount == 0 }
+    }
+
+    // 같은 클라이언트가 /events를 다시 열면 이전 스트림은 서버가 닫는다(EOF). 최대 1개.
+    @Test
+    fun secondEventsStreamForSameClientReplacesFirst() {
+        val token = pair()
+        val first = openEvents(token)
+        nextStateEvent(first.second)
+        waitUntil { server.sseClientCount == 1 }
+        val second = openEvents(token)
+        nextStateEvent(second.second)
+        // 첫 스트림은 EOF
+        var line: String? = ""
+        while (line != null) line = runCatching { first.second.readLine() }.getOrNull()
+        assertNull(line)
+        waitUntil { server.sseClientCount == 1 }
+        // 두 번째 스트림은 계속 받는다
+        backend.flow.value = backend.flow.value.copy(volume = 33, updatedAtMs = 20L)
+        assertEquals(33, nextStateEvent(second.second).getInt("volume"))
+        first.first.disconnect()
+        second.first.disconnect()
+        waitUntil { server.sseClientCount == 0 }
+    }
+
+    // 명령 뒤 강제 push: 내용이 같아도 forceSeq가 오르면 SSE로 한 번 더 나간다. updatedAtMs만 바뀐 것은 여전히 안 나간다.
+    @Test
+    fun forcedPushIsSentEvenWhenContentUnchanged() {
+        val token = pair()
+        val (conn, reader) = openEvents(token)
+        try {
+            val first = nextStateEvent(reader)
+            backend.flow.value = backend.flow.value.copy(updatedAtMs = 2L)
+            backend.flow.value = backend.flow.value.copy(updatedAtMs = 3L, forceSeq = 1L)
+            val pushed = nextStateEvent(reader)
+            assertEquals(first.getString("playback"), pushed.getString("playback"))
+            assertEquals(3L, pushed.getLong("updatedAtMs"))
+            assertFalse(pushed.has("forceSeq"))
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    // SSE가 많이 열려 있어도(요청 상한보다 많아도) 명령·상태 요청은 받는다. SSE 자체 상한을 넘으면 503 busy.
+    @Test
+    fun commandsStillAcceptedWhileManySseOpenAndSseHasOwnCap() {
+        server.stop()
+        server = LocalControlServer(
+            backend, auth, window,
+            LocalControlServer.Config(
+                port = 0, bindAddress = InetAddress.getLoopbackAddress(), pingIntervalMs = 300L,
+                maxConnections = 2, maxSseConnections = 3,
+            ),
+        )
+        port = server.start()
+        val tokens = (1..4).map { pair("허브 $it") }
+        val streams = tokens.take(3).map { openEvents(it) }
+        streams.forEach { nextStateEvent(it.second) }
+        waitUntil { server.sseClientCount == 3 }
+        assertEquals(0, server.requestConnectionCount)
+
+        // 요청 상한(2)보다 많은 SSE(3)가 열려 있어도 명령은 200
+        val ok = http("POST", "/api/v1/command", """{"command":"play"}""", tokens[0])
+        assertEquals(200, ok.code)
+        assertEquals(200, http("GET", "/api/v1/state", token = tokens[1]).code)
+
+        // 네 번째 클라이언트의 SSE는 상한 → 503 busy
+        val c = url("/api/v1/events").openConnection() as HttpURLConnection
+        c.setRequestProperty("Authorization", "Bearer ${tokens[3]}")
+        c.readTimeout = 5_000
+        assertEquals(503, c.responseCode)
+        assertEquals("busy", JSONObject(c.errorStream.bufferedReader().readText()).getString("error"))
+        c.disconnect()
+        assertEquals(3, server.sseClientCount)
+
+        streams.forEach { it.first.disconnect() }
         waitUntil { server.sseClientCount == 0 }
     }
 

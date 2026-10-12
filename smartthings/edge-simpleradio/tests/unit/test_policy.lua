@@ -29,4 +29,13 @@ t.test("pairing window: 5 minutes", function()
   t.eq(p.PAIR_INTERVAL_S, 10)
 end)
 
+t.test("command timeout exceeds the host's 5 s execute budget (so its 504 reaches us)", function()
+  t.ok(p.COMMAND_TIMEOUT_S >= 8, "COMMAND_TIMEOUT_S=" .. tostring(p.COMMAND_TIMEOUT_S))
+  t.ok(p.COMMAND_TIMEOUT_S > 5)
+end)
+
+t.test("command verification delay is ~1.5 s", function()
+  t.eq(p.VERIFY_DELAY_S, 1.5)
+end)
+
 t.run("test_policy")

@@ -218,16 +218,46 @@ test.register_coroutine_test(
   end
 )
 
+local policy = require "simpleradio.policy"
+
+local function expect(ev)
+  test.socket.capability:__expect_send(mock_device:generate_test_message("main", ev))
+end
+
+local function expect_full_state()
+  expect(capabilities.switch.switch.on())
+  expect(capabilities.mediaPlayback.playbackStatus.playing())
+  expect(capabilities.audioVolume.volume(40))
+  expect(capabilities.audioMute.mute.unmuted())
+  expect(capabilities.mediaPresets.presets(HOST_STATE.presets))
+  expect(capabilities.audioTrackData.audioTrackData({
+    title = HOST_STATE.title, artist = HOST_STATE.artist, albumArtUrl = HOST_STATE.albumArtUrl,
+  }))
+end
+
+--- refresh so the driver's snapshot (dedupe) holds HOST_STATE; later events are then "changes".
+local function refresh_and_sync()
+  test.socket.capability:__queue_receive({ mock_device.id,
+    { capability = "refresh", component = "main", command = "refresh", args = {} } })
+  expect_full_state()
+  test.wait_for_events()
+  fake.requests = {}
+end
+
 test.register_coroutine_test(
-  "switch on -> POST /api/v1/command {command:on} with Bearer token, optimistic switch event",
+  "switch on -> POST /api/v1/command {command:on} with Bearer token; no optimistic event, " ..
+  "verification GET /state after VERIFY_DELAY_S re-emits switch + playbackStatus (unchanged)",
   function()
     test.wait_for_events()
+    refresh_and_sync()
+    -- the driver's call_with_delay(VERIFY_DELAY_S) gets this test timer
+    test.timer.__create_and_queue_test_time_advance_timer(policy.VERIFY_DELAY_S, "oneshot")
     test.socket.capability:__queue_receive({ mock_device.id,
       { capability = "switch", component = "main", command = "on", args = {} } })
-    test.socket.capability:__expect_send(mock_device:generate_test_message("main", capabilities.switch.switch.on()))
     test.wait_for_events()
     local req = last_request()
     assert(req, "no HTTP request made")
+    assert_eq(#fake.requests, 1, "only the command so far (no event, no immediate GET)")
     assert_eq(req.method, "POST", "method")
     assert_eq(req.path, "/api/v1/command", "path")
     assert_eq(req.ip, "192.168.0.77", "ip")
@@ -236,20 +266,79 @@ test.register_coroutine_test(
     assert_eq(req.headers.host, "192.168.0.77:8765", "host header")
     assert_eq(req.json.command, "on", "command")
     assert_eq(req.json.value, nil, "no value")
+
+    -- 1.5 s later: GET /state; switch and playbackStatus are re-emitted although unchanged,
+    -- the rest is deduped
+    test.mock_time.advance_time(policy.VERIFY_DELAY_S)
+    expect(capabilities.switch.switch.on())
+    expect(capabilities.mediaPlayback.playbackStatus.playing())
+    test.wait_for_events()
+    assert_eq(#fake.requests, 2, "verification request")
+    assert_eq(last_request().method, "GET", "verify method")
+    assert_eq(last_request().path, "/api/v1/state", "verify path")
   end
 )
 
 test.register_coroutine_test(
-  "setVolume(55) -> {command:setVolume, value:55}; volume event",
+  "switch on -> host 503 -> immediate GET /state and full forced re-emit (switch reverts)",
   function()
     test.wait_for_events()
+    refresh_and_sync()
+    fake.respond = function(req)
+      if req.path == "/api/v1/command" then return http_response(503, { error = "unavailable" }) end
+      return default_respond(req)
+    end
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "switch", component = "main", command = "on", args = {} } })
+    expect_full_state()
+    test.wait_for_events()
+    assert_eq(#fake.requests, 2, "command + state re-read")
+    assert_eq(fake.requests[1].path, "/api/v1/command", "first")
+    assert_eq(fake.requests[2].method, "GET", "second method")
+    assert_eq(fake.requests[2].path, "/api/v1/state", "second path")
+  end
+)
+
+test.register_coroutine_test(
+  "switch on -> host 504 and GET /state 504 too -> last known values re-emitted",
+  function()
+    test.wait_for_events()
+    refresh_and_sync()
+    fake.respond = function() return http_response(504, { error = "timeout" }) end
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "switch", component = "main", command = "on", args = {} } })
+    expect_full_state()
+    test.wait_for_events()
+    assert_eq(#fake.requests, 2, "command + state re-read")
+    assert_eq(driver_device():get_field("token"), TOKEN, "token kept")
+  end
+)
+
+test.register_coroutine_test(
+  "setVolume(55) -> {command:setVolume, value:55}; optimistic volume event, then verified (host says 40)",
+  function()
+    test.wait_for_events()
+    test.timer.__create_and_queue_test_time_advance_timer(policy.VERIFY_DELAY_S, "oneshot")
     test.socket.capability:__queue_receive({ mock_device.id,
       { capability = "audioVolume", component = "main", command = "setVolume", args = { 55 } } })
-    test.socket.capability:__expect_send(mock_device:generate_test_message("main", capabilities.audioVolume.volume(55)))
+    expect(capabilities.audioVolume.volume(55))
     test.wait_for_events()
     local req = last_request()
     assert_eq(req.json.command, "setVolume", "command")
     assert_eq(req.json.value, 55, "value")
+
+    test.mock_time.advance_time(policy.VERIFY_DELAY_S)
+    -- snapshot only knows volume=55: everything else in HOST_STATE is new, volume is corrected
+    expect(capabilities.switch.switch.on())
+    expect(capabilities.mediaPlayback.playbackStatus.playing())
+    expect(capabilities.audioVolume.volume(40))
+    expect(capabilities.audioMute.mute.unmuted())
+    expect(capabilities.mediaPresets.presets(HOST_STATE.presets))
+    expect(capabilities.audioTrackData.audioTrackData({
+      title = HOST_STATE.title, artist = HOST_STATE.artist, albumArtUrl = HOST_STATE.albumArtUrl,
+    }))
+    test.wait_for_events()
+    assert_eq(last_request().path, "/api/v1/state", "verify path")
   end
 )
 
@@ -288,17 +377,7 @@ test.register_coroutine_test(
     test.wait_for_events()
     test.socket.capability:__queue_receive({ mock_device.id,
       { capability = "refresh", component = "main", command = "refresh", args = {} } })
-    local function expect(ev)
-      test.socket.capability:__expect_send(mock_device:generate_test_message("main", ev))
-    end
-    expect(capabilities.switch.switch.on())
-    expect(capabilities.mediaPlayback.playbackStatus.playing())
-    expect(capabilities.audioVolume.volume(40))
-    expect(capabilities.audioMute.mute.unmuted())
-    expect(capabilities.mediaPresets.presets(HOST_STATE.presets))
-    expect(capabilities.audioTrackData.audioTrackData({
-      title = HOST_STATE.title, artist = HOST_STATE.artist, albumArtUrl = HOST_STATE.albumArtUrl,
-    }))
+    expect_full_state()
     test.wait_for_events()
     assert_eq(last_request().method, "GET", "method")
     assert_eq(last_request().path, "/api/v1/state", "path")
@@ -306,13 +385,44 @@ test.register_coroutine_test(
 )
 
 test.register_coroutine_test(
-  "401 on a command drops the stored token and keeps state",
+  "refresh with a state that has no title -> audioTrackData is omitted (the capability requires title)",
   function()
     test.wait_for_events()
+    -- the reason: the real capability schema rejects a track without a title
+    local ok, err = pcall(capabilities.audioTrackData.audioTrackData, { artist = "x" })
+    assert(not ok and tostring(err):find("title"), "expected schema rejection, got " .. tostring(err))
+
+    local idle = {}
+    for k, v in pairs(HOST_STATE) do idle[k] = v end
+    idle.title, idle.artist, idle.albumArtUrl = nil, nil, nil
+    idle.power, idle.playback = "off", "stopped"
+    fake.respond = function(req)
+      if req.path == "/api/v1/state" then return http_response(200, idle) end
+      return default_respond(req)
+    end
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "refresh", component = "main", command = "refresh", args = {} } })
+    expect(capabilities.switch.switch.off())
+    expect(capabilities.mediaPlayback.playbackStatus.stopped())
+    expect(capabilities.audioVolume.volume(40))
+    expect(capabilities.audioMute.mute.unmuted())
+    expect(capabilities.mediaPresets.presets(HOST_STATE.presets))
+    test.wait_for_events()
+    assert_eq(last_request().path, "/api/v1/state", "path")
+  end
+)
+
+test.register_coroutine_test(
+  "401 on a command drops the stored token; no state re-read, last known values re-emitted",
+  function()
+    test.wait_for_events()
+    refresh_and_sync()
     fake.respond = function() return http_response(401, { error = "unauthorized" }) end
     test.socket.capability:__queue_receive({ mock_device.id,
       { capability = "mediaPlayback", component = "main", command = "pause", args = {} } })
+    expect_full_state()
     test.wait_for_events()
+    assert_eq(#fake.requests, 1, "no GET /state with a dead token")
     assert_eq(last_request().path, "/api/v1/command", "path")
     assert_eq(driver_device():get_field("token"), nil, "token dropped")
   end

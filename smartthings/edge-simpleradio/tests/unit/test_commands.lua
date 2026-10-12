@@ -47,13 +47,31 @@ t.test("supported() lists every mapped command (14)", function()
   t.eq(#c.supported(), 14)
 end)
 
-t.test("optimistic state only for deterministic commands", function()
+t.test("optimistic state only for setVolume / mute / unmute", function()
   t.eq(c.optimistic_state({ command = "setVolume", value = 30 }), { volume = 30 })
   t.eq(c.optimistic_state({ command = "mute" }), { muted = true })
-  t.eq(c.optimistic_state({ command = "pause" }), { playback = "paused" })
-  t.is_nil(c.optimistic_state({ command = "volumeUp" }))
-  t.is_nil(c.optimistic_state({ command = "next" }))
-  t.is_nil(c.optimistic_state({ command = "playPreset", value = "1" }))
+  t.eq(c.optimistic_state({ command = "unmute" }), { muted = false })
+  -- power/playback are verified against the host instead (200 does not mean it played)
+  for _, cmd in ipairs({ "on", "off", "play", "pause", "stop", "volumeUp", "next", "playPreset" }) do
+    t.is_nil(c.optimistic_state({ command = cmd, value = "1" }), cmd)
+  end
+  t.is_nil(c.optimistic_state(nil))
+end)
+
+t.test("verify_keys: attributes the app waits on after each command", function()
+  t.eq(c.verify_keys({ command = "on" }), { ["switch.switch"] = true, ["mediaPlayback.playbackStatus"] = true })
+  t.eq(c.verify_keys({ command = "pause" }), { ["mediaPlayback.playbackStatus"] = true })
+  t.eq(c.verify_keys({ command = "setVolume", value = 3 }), { ["audioVolume.volume"] = true })
+  t.eq(c.verify_keys({ command = "mute" }), { ["audioMute.mute"] = true })
+  t.eq(c.verify_keys({ command = "next" }), { ["audioTrackData.audioTrackData"] = true })
+  t.eq(c.verify_keys({ command = "bogus" }), {})
+  t.eq(c.verify_keys(nil), {})
+  -- every supported command has a verification key
+  for _, entry in ipairs(c.supported()) do
+    local body = c.to_request(entry.capability, entry.command,
+      { volume = 1, state = "muted", presetId = "1" })
+    t.ok(next(c.verify_keys(body)) ~= nil, entry.capability .. "." .. entry.command)
+  end
 end)
 
 t.run("test_commands")

@@ -24,7 +24,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 // 서버가 앱(호스트 서비스)에 묻는 것. Android 의존은 전부 이 뒤에 둔다(서버는 JVM 테스트에서 그대로 돈다).
 interface LocalBackend {
@@ -48,7 +47,10 @@ interface LocalBackend {
 
 // 로컬 제어 API v1 HTTP 서버(smartthings/LAN_API.md). java.net.ServerSocket + 코루틴.
 // - 요청마다 응답 하나 쓰고 닫는다(keep-alive 없음). SSE만 연결을 유지한다.
-// - 요청 16KB·읽기 10초·동시 연결 16개 제한. 토큰은 로그에 남기지 않는다.
+// - 요청 16KB·읽기 10초. 동시 연결은 요청 16개·SSE 8개를 따로 센다(ConnectionBudget) — SSE가 요청을 막지 않는다.
+// - SSE는 페어링된 클라이언트(토큰)당 하나만: 같은 클라이언트가 /events를 다시 열면 이전 스트림을 닫는다
+//   (허브가 재접속할 때 반쯤 죽은 옛 소켓이 남지 않게). 쓰기(상태·ping)가 실패하면 그 자리에서 끊는다.
+// - 토큰은 로그에 남기지 않는다.
 class LocalControlServer(
     private val backend: LocalBackend,
     private val auth: LocalAuth,
@@ -60,21 +62,31 @@ class LocalControlServer(
         val port: Int = DEFAULT_PORT,
         // null = 모든 인터페이스
         val bindAddress: InetAddress? = null,
+        // 명령·상태·아트 요청의 동시 연결 상한(SSE 제외)
         val maxConnections: Int = 16,
+        // SSE 스트림 상한(클라이언트당 1개이므로 사실상 페어링 수 상한)
+        val maxSseConnections: Int = 8,
         val maxRequestBytes: Int = HttpRequestParser.DEFAULT_MAX_BYTES,
         val readTimeoutMs: Int = 10_000,
         val pingIntervalMs: Long = 25_000L,
         val commandTimeoutMs: Long = 5_000L,
     )
 
+    // 접속 하나. SSE로 판명되면 clientId가 채워지고 예산이 SSE 슬롯으로 옮겨진다.
+    private class Conn(val socket: Socket) {
+        @Volatile var clientId: String = ""
+        @Volatile var sse: Boolean = false
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var serverSocket: ServerSocket? = null
-    private val active = AtomicInteger(0)
-    // 열린 소켓 → SSE면 클라이언트 id, 아니면 "".
-    private val sockets = ConcurrentHashMap<Socket, String>()
-    private val sseCount = AtomicInteger(0)
+    private val budget = ConnectionBudget(config.maxConnections, config.maxSseConnections)
+    private val conns = ConcurrentHashMap<Socket, Conn>()
+    // 클라이언트 id → 지금 살아 있는 SSE 소켓(하나).
+    private val streams = ConcurrentHashMap<String, Socket>()
 
-    val sseClientCount: Int get() = sseCount.get()
+    val sseClientCount: Int get() = budget.sseCount
+    val requestConnectionCount: Int get() = budget.requestCount
 
     // 포트를 열고 접속을 받기 시작한다. 실제로 묶인 포트를 돌려준다(port=0이면 임의 포트). 실패하면 IOException.
     @Synchronized
@@ -94,7 +106,7 @@ class LocalControlServer(
         scope.launch {
             auth.clients.collect { list ->
                 val ids = list.mapTo(HashSet()) { it.id }
-                sockets.forEach { (s, id) -> if (id.isNotEmpty() && id !in ids) runCatching { s.close() } }
+                conns.values.forEach { c -> if (c.clientId.isNotEmpty() && c.clientId !in ids) runCatching { c.socket.close() } }
             }
         }
         return ss.localPort
@@ -105,8 +117,9 @@ class LocalControlServer(
         val ss = serverSocket ?: return
         serverSocket = null
         runCatching { ss.close() }
-        sockets.keys.forEach { runCatching { it.close() } }
-        sockets.clear()
+        conns.keys.forEach { runCatching { it.close() } }
+        conns.clear()
+        streams.clear()
         scope.cancel()
     }
 
@@ -120,8 +133,7 @@ class LocalControlServer(
                 delay(200)
                 continue
             }
-            if (active.incrementAndGet() > config.maxConnections) {
-                active.decrementAndGet()
+            if (!budget.tryAcquireRequest()) {
                 runCatching {
                     socket.soTimeout = 2_000
                     HttpResponses.json(socket.getOutputStream(), 503, LocalJson.error("busy").toString())
@@ -129,10 +141,11 @@ class LocalControlServer(
                 runCatching { socket.close() }
                 continue
             }
-            sockets[socket] = ""
+            val conn = Conn(socket)
+            conns[socket] = conn
             scope.launch {
                 try {
-                    handle(socket)
+                    handle(conn)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: IOException) {
@@ -140,15 +153,16 @@ class LocalControlServer(
                 } catch (t: Throwable) {
                     log("요청 처리 오류 ${t.javaClass.simpleName}")
                 } finally {
-                    sockets.remove(socket)
+                    conns.remove(socket)
                     runCatching { socket.close() }
-                    active.decrementAndGet()
+                    if (conn.sse) budget.releaseSse() else budget.releaseRequest()
                 }
             }
         }
     }
 
-    private suspend fun handle(socket: Socket) {
+    private suspend fun handle(conn: Conn) {
+        val socket = conn.socket
         socket.soTimeout = config.readTimeoutMs
         socket.tcpNoDelay = true
         val input = socket.getInputStream().buffered()
@@ -162,10 +176,10 @@ class LocalControlServer(
             runCatching { HttpResponses.json(out, 408, LocalJson.error("timeout").toString()) }
             return
         }
-        route(req, socket, out)
+        route(req, conn, out)
     }
 
-    private suspend fun route(req: HttpRequest, socket: Socket, out: OutputStream) {
+    private suspend fun route(req: HttpRequest, conn: Conn, out: OutputStream) {
         val path = req.path
         when {
             path == "/api/v1/info" -> {
@@ -189,7 +203,7 @@ class LocalControlServer(
             path == "/api/v1/events" -> {
                 if (!requireMethod(req, out, "GET")) return
                 val client = authorized(req, out) ?: return
-                events(req, socket, out, client)
+                events(req, conn, out, client)
             }
             path.startsWith(ART_PREFIX) && path.endsWith(".png") -> {
                 if (!requireMethod(req, out, "GET", allowHead = true)) return
@@ -272,13 +286,28 @@ class LocalControlServer(
         }
     }
 
-    // SSE: 헤더 → 현재 상태 1회 → 바뀔 때마다 state 이벤트, 25초마다 ": ping". 클라이언트가 끊거나(읽기 EOF)
-    // 쓰기가 실패하거나 토큰이 해제되면(소켓 닫힘) 끝난다.
-    private suspend fun events(req: HttpRequest, socket: Socket, out: OutputStream, client: PairedClient) {
+    // SSE: 헤더 → 현재 상태 1회 → 바뀔 때마다(또는 명령 뒤 강제 push마다) state 이벤트, 25초마다 ": ping".
+    // 클라이언트가 끊거나(읽기 EOF) 쓰기가 실패하거나(죽은 소켓) 토큰이 해제되거나 같은 클라이언트가 새 스트림을
+    // 열면(소켓 닫힘) 끝난다.
+    private suspend fun events(req: HttpRequest, conn: Conn, out: OutputStream, client: PairedClient) {
+        val socket = conn.socket
+        // 요청 슬롯 → SSE 슬롯. SSE가 꽉 찼으면 503(요청 슬롯은 그대로이므로 finally가 평소처럼 반납한다).
+        if (!budget.convertToSse()) {
+            log("SSE 상한(${config.maxSseConnections}) → 503 busy")
+            HttpResponses.json(out, 503, LocalJson.error("busy").toString())
+            return
+        }
+        conn.sse = true
+        conn.clientId = client.id
         socket.soTimeout = 0
+        runCatching { socket.keepAlive = true }
         val base = baseUrl(req)
-        sockets[socket] = client.id
-        sseCount.incrementAndGet()
+        // 같은 클라이언트의 이전 스트림은 닫는다(허브 재접속 시 옛 소켓이 남지 않게).
+        val previous = streams.put(client.id, socket)
+        if (previous != null && previous !== socket) {
+            log("SSE 교체 (${client.id}) — 이전 스트림 닫음")
+            runCatching { previous.close() }
+        }
         try {
             writeText(out, SseFormat.HEADERS)
             val streamJob = scope.launch {
@@ -287,7 +316,8 @@ class LocalControlServer(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: IOException) {
-                    // 끊김
+                    // 쓰기 실패 = 죽은 소켓. 바로 끊는다(finally에서 닫힘).
+                    log("SSE 쓰기 실패 (${client.id}) → 연결 끊음")
                 } catch (t: Throwable) {
                     log("SSE 오류 ${t.javaClass.simpleName}")
                 }
@@ -310,7 +340,7 @@ class LocalControlServer(
                 readerJob.cancel()
             }
         } finally {
-            sseCount.decrementAndGet()
+            streams.remove(client.id, socket)
         }
     }
 
@@ -321,11 +351,12 @@ class LocalControlServer(
         launch {
             while (true) {
                 delay(config.pingIntervalMs)
+                // ping 쓰기가 실패하면 IOException이 coroutineScope를 깨뜨려 스트림 전체가 끝난다(죽은 소켓 감지).
                 lock.withLock { writeText(out, SseFormat.PING) }
             }
         }
         backend.states.collect { st ->
-            if (!st.sameContentAs(last)) {
+            if (st.shouldEmitAfter(last)) {
                 last = st
                 lock.withLock { writeText(out, SseFormat.event("state", LocalJson.state(st, base).toString())) }
             }

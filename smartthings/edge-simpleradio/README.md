@@ -55,7 +55,9 @@ edge-simpleradio/
 | `refresh` | `GET /api/v1/state` 후 모든 속성 다시 전송 |
 
 - 이벤트는 **값이 바뀐 속성만** 보낸다(새로고침만 예외).
-- 명령이 성공하면 결과가 확실한 것(on/off, play/pause/stop, setVolume, mute/unmute)은 바로 화면에 반영하고, 실제 상태는 SSE로 곧 다시 맞춰진다. 실패하면 로그만 남기고 상태는 그대로 둔다. 명령 타임아웃 5초.
+- **명령 결과는 검증된 상태로 표시한다(2026-10-12 변경).** on/off·play/pause/stop·playPreset·next/previous는 태블릿이 200을 줘도 바로 반영하지 않고 **1.5초 뒤 `GET /api/v1/state`로 실제 상태를 읽어** 그 값을 보낸다(명령이 겨냥한 속성은 값이 같아도 다시 보내 앱의 대기 표시를 끝낸다). 그래서 SmartThings 앱의 스위치는 탭 후 약 1.5초 뒤에 **실제** 상태로 바뀌고, 태블릿이 실제로 켜지지 못했으면 OFF로 되돌아간다. setVolume·mute/unmute만 바로 반영(낙관)하고 역시 1.5초 뒤 검증한다.
+- 명령이 **실패**하면(타임아웃·연결 실패·503/504/500 등 2xx가 아닌 모든 응답) 즉시 `GET /api/v1/state`로 실제 상태를 읽어 전부 다시 보내고, 그 조회마저 실패하면 마지막으로 보냈던 값을 다시 보낸다 → 스위치가 대기 상태에 머물지 않는다. 타임아웃·503·504는 연결 실패로 집계되어 3회면 mDNS로 IP를 재확인한다. 명령 타임아웃 8초(태블릿 자체 실행 예산 5초보다 길어야 태블릿의 504가 드라이버에 도달한다).
+- 제목(`title`)이 없는 상태에서는 `audioTrackData` 이벤트를 아예 보내지 않는다(허브가 "Required field missing: title"로 거부하므로). 앱은 마지막 곡 정보를 그대로 보여 준다.
 - **온라인 판정**: 페어링되어 있고 (SSE 연결 중 또는 마지막 상태 수신이 60초 이내). 페어링 전이나 태블릿에 닿지 않으면 오프라인.
 
 ## 준비물
@@ -130,7 +132,10 @@ smartthings edge:drivers:logcat <driverId> --hub-address <허브IP> --log-level 
 | `연결 실패 3회 -> mDNS로 IP 재확인` | 태블릿 IP가 바뀌었을 수 있어 TXT id로 다시 찾음 |
 | `주소 a -> b` | 태블릿 IP 갱신(영구 저장) |
 | `토큰이 거부됨(…401) -> 토큰 삭제 후 다시 페어링합니다` | 앱에서 연결 해제됨 |
-| `명령 X 실패: …` | 명령 전송 실패(상태는 바꾸지 않음) |
+| `명령 X 전송 완료 -> 1.5초 뒤 상태 검증` | 태블릿이 2xx 응답. 1.5초 뒤 `GET /state`로 실제 상태를 읽어 보냄 |
+| `명령 X 실패: …` | 명령 전송 실패 → 바로 `GET /state`로 실제 상태를 다시 보냄(스위치 원복) |
+| `명령 X 실패 후 원복: 상태 재조회 실패(…) -> 마지막 상태를 다시 보냅니다` | 태블릿에 전혀 닿지 않음. 마지막으로 보낸 값을 다시 보내 앱의 대기 표시를 끝냄 |
+| `명령 X 검증: 상태 재조회 실패(…)` | 명령은 2xx였지만 1.5초 뒤 상태 조회가 실패(마지막 값 재전송) |
 
 ## 문제 해결
 
@@ -147,6 +152,9 @@ smartthings edge:drivers:logcat <driverId> --hub-address <허브IP> --log-level 
   - 10분 창이 닫힌 뒤였을 수 있다 → 다시 누르면 된다(대기 모드에서도 30초 안에 감지).
   - `curl -X POST http://<태블릿IP>:8765/api/v1/pair -d '{"client":"test"}'` 가 403이면 창이 닫힌 상태.
 - **명령이 반응 없다**: logcat의 `명령 … 실패` 메시지 확인. 401이면 자동 재페어링, 400이면 앱 쪽이 그 명령/값을 거부한 것.
+- **`명령 on 실패: timeout`(또는 `connect …: timeout`)이 반복되는데 기기는 "연결됨"으로 보인다**: 화면이 오래 꺼져 있던 태블릿이 **잠들어** 허브→태블릿 새 연결(명령)만 8초 안에 못 받는 상태다(이미 열린 SSE는 살아 있어 온라인으로 보임). 태블릿 Simple Radio 앱의 **벽걸이 모드**(로컬 제어 켜짐 + 충전 중이면 CPU/Wi-Fi 깨움 유지)를 켜 두고, 충전기에 꽂혀 있는지 확인한다. 임시 확인: Mac에서 `curl -m 8 -X POST http://<태블릿IP>:8765/api/v1/command -H 'Authorization: Bearer <토큰>' -d '{"command":"on"}'` 의 응답 시간.
+- **`명령 on 실패: command: HTTP 503 unavailable`**: 태블릿 앱의 미디어 세션이 없는 상태(앱이 백그라운드에서 정리됨). 태블릿에서 앱을 한 번 열거나 폰 리모컨으로 재생하면 돌아온다(앱 쪽 자동 재연결은 v0.9.1에서 보강).
+- **스위치가 켜졌다가 1~2초 뒤 꺼짐으로 돌아간다**: 정상 동작이다. 태블릿이 200을 줬지만 실제로 재생이 시작되지 않은 것(검증 조회가 실제 상태를 반영). logcat에서 `명령 on 검증` 이후 상태와 태블릿 앱 로그를 확인한다.
 - **기기를 지우고 다시 추가**: 앱에서 기기 삭제 → 주변 기기 검색 → 연결 허용. (새 기기라 토큰도 새로 받는다. 태블릿 앱의 예전 토큰은 앱 설정에서 해제 가능.)
 
 ## 테스트
@@ -172,10 +180,10 @@ tests/run.sh
 | 단계 | 내용 | 필요 |
 |---|---|---|
 | syntax | 모든 .lua `luac -p` | Lua 5.3 |
-| unit | sse / http / state_map / commands / mdns_parse / policy | Lua 5.3 |
+| unit | sse / http / state_map / commands / mdns_parse / policy / handlers(가짜 클라이언트·세션·타이머로 명령 실패 원복·성공 검증 흐름) | Lua 5.3 |
 | client vs mock | `client.lua`를 LuaSocket으로 `mock_host.py`에 붙여 info·pair(403→200)·state·command·SSE(무프레임/청크)·401·타임아웃 확인 | luasocket, dkjson, python3 |
 | session vs mock | 실제 `session.lua`를 cosock 스케줄러로 돌려 mDNS 해석→페어링 재시도→SSE→변경분 전송→401 재페어링→404 폴링 전환→IP 재확인→오프라인/복구→정지 확인(시간 상수 축소) | + cosock, lua_libs |
-| driver e2e | 공식 `integration_test` 프레임워크로 `init.lua` 전체 구동: 발견→기기 생성, 명령→HTTP 요청, 새로고침→이벤트, 401→토큰 삭제 | lua_libs |
+| driver e2e | 공식 `integration_test` 프레임워크로 `init.lua` 전체 구동: 발견→기기 생성, 명령→HTTP 요청→1.5초 뒤 검증 조회, 503/504→즉시 상태 재조회·원복, 새로고침→이벤트(제목 없으면 audioTrackData 생략), 401→토큰 삭제 | lua_libs |
 
 가짜 태블릿만 따로 띄우기: `python3 tests/mock_host.py --port 8765 --pairing-open` (제어용 `/_mock/*` 엔드포인트는 파일 상단 설명 참고).
 

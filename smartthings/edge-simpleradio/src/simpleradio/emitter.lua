@@ -24,11 +24,7 @@ function M.to_capability_event(desc)
   return attr(desc.value)
 end
 
---- Apply a (full or partial) host state to the device, emitting only changed attributes.
---- @param opts table|nil { partial = bool, force = bool }
---- @return number events emitted
-function M.apply(device, state, opts)
-  local events = state_map.events_for_state(snapshot_of(device), state, opts)
+local function emit_descriptors(device, events)
   local n = 0
   for _, desc in ipairs(events) do
     local ok, err = pcall(function()
@@ -45,6 +41,20 @@ function M.apply(device, state, opts)
     end
   end
   return n
+end
+
+--- Apply a (full or partial) host state to the device, emitting only changed attributes.
+--- @param opts table|nil { partial = bool, force = true | { [state_map key] = true } }
+--- @return number events emitted
+function M.apply(device, state, opts)
+  return emit_descriptors(device, state_map.events_for_state(snapshot_of(device), state, opts))
+end
+
+--- Re-emit the last known values (no host round trip). Used when a command failed and the
+--- host cannot be re-read either, so the app leaves its pending state with the old value.
+--- @return number events emitted (0 when nothing was ever emitted, e.g. right after a restart)
+function M.reemit(device)
+  return emit_descriptors(device, state_map.snapshot_events(snapshot_of(device)))
 end
 
 --- Forget what was emitted so the next state re-emits everything.

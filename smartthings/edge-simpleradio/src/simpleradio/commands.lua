@@ -75,23 +75,49 @@ function M.supported()
 end
 
 --- Partial host state to assume after a successful command (optimistic UI update).
---- Only deterministic outcomes are returned; relative or ambiguous commands
---- (volumeUp/Down, next/previous, playPreset) wait for the real state from the host.
+--- Only setVolume / mute / unmute are reliable enough to show before verification: the host
+--- applies them synchronously. Power/playback commands return 200 even when the player did
+--- nothing (released MediaController, 2026-10-12), so they wait for the verification read
+--- (handlers.send_command) instead of being assumed.
 --- @param body table output of M.to_request
 --- @return table|nil partial state
 function M.optimistic_state(body)
   if type(body) ~= "table" then return nil end
   local c = body.command
-  if c == "on" then return { power = "on" }
-  elseif c == "off" then return { power = "off", playback = "stopped" }
-  elseif c == "play" then return { power = "on", playback = "playing" }
-  elseif c == "pause" then return { playback = "paused" }
-  elseif c == "stop" then return { playback = "stopped" }
-  elseif c == "setVolume" then return { volume = body.value }
+  if c == "setVolume" then return { volume = body.value }
   elseif c == "mute" then return { muted = true }
   elseif c == "unmute" then return { muted = false }
   end
   return nil
+end
+
+-- command -> state_map keys the SmartThings app is waiting on (its tile shows a spinner until
+-- an event for that attribute arrives), so the verification read always re-emits them.
+local VERIFY_KEYS = {
+  on = { "switch.switch", "mediaPlayback.playbackStatus" },
+  off = { "switch.switch", "mediaPlayback.playbackStatus" },
+  play = { "switch.switch", "mediaPlayback.playbackStatus" },
+  pause = { "mediaPlayback.playbackStatus" },
+  stop = { "mediaPlayback.playbackStatus" },
+  next = { "audioTrackData.audioTrackData" },
+  previous = { "audioTrackData.audioTrackData" },
+  playPreset = { "switch.switch", "mediaPlayback.playbackStatus", "audioTrackData.audioTrackData" },
+  setVolume = { "audioVolume.volume" },
+  volumeUp = { "audioVolume.volume" },
+  volumeDown = { "audioVolume.volume" },
+  mute = { "audioMute.mute" },
+  unmute = { "audioMute.mute" },
+}
+
+--- Attribute keys (state_map.ORDER keys) that must be emitted even if unchanged once the
+--- host state is re-read after `body`, so the app leaves its pending state with the real value.
+--- @param body table output of M.to_request
+--- @return table set { [key] = true }
+function M.verify_keys(body)
+  local set = {}
+  local list = type(body) == "table" and VERIFY_KEYS[body.command] or nil
+  for _, k in ipairs(list or {}) do set[k] = true end
+  return set
 end
 
 return M

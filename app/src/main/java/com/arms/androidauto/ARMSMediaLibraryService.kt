@@ -235,6 +235,12 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     private var pausedByAudioFocusLoss = false
     private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
+    // 덕킹 고착 진단/복구(DuckingRecoveryPolicy, ISSUES_2026-10-12 §2). 재생이 시작될 때마다 볼륨 상태를 한 번
+    // 기록해, 기기 로그에서 "조용한 재생"이 앱 배율(vol)·포커스 억제(supp)·라우드니스(le) 중 무엇과 함께 왔는지 본다.
+    private var startVolumeLogged = false
+    // LoudnessEnhancer 예외는 클래스별로 한 번만 기록한다(8초마다 같은 줄이 쌓이지 않게).
+    private val loudnessEnhancerErrorsLogged = mutableSetOf<String>()
+
     // 차량 연결 상태. Android Auto는 차량 링크가 끊겨도 우리 서비스 바인딩과 미디어 컨트롤러를
     // 그대로 유지하기 때문에, onDisconnected만으로는 "차에서 내렸다"를 알 수 없다.
     private var carConnection: CarConnection? = null
@@ -258,7 +264,11 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         // 오디오 경로가 아예 열리지 않은 채로 조용히 디코딩만 계속되는 증상이 있었다
         // (다른 음악 앱이 먼저 재생돼 포커스를 요청해야 그제서야 이 앱 소리도 들리던 문제).
         // 오디오 포커스를 명시적으로 요청하도록 설정해 재생 시작과 동시에 경로가 열리게 한다.
-        player = ExoPlayer.Builder(this).build().apply {
+        player = ExoPlayer.Builder(this)
+            // 재생 중에만 CPU·Wi-Fi 잠금을 잡는다(멈추면 놓는다). 벽걸이 태블릿은 화면이 꺼진 채 몇 시간씩
+            // 스트리밍하므로, 도즈로 Wi-Fi가 졸면 버퍼가 마르고 스트림이 끊긴다.
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .build().apply {
             // 블루투스가 끊기거나 이어폰이 빠지면(ACTION_AUDIO_BECOMING_NOISY) 폰 스피커로
             // 계속 흘러나오지 않도록 멈춘다. 라디오는 아래 onPlayWhenReadyChanged에서 완전 정지.
             setHandleAudioBecomingNoisy(true)
@@ -337,6 +347,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // (갱신 루프는 isPlaying이 아니면 건너뛰므로 HLS 버퍼링 중 타이머가 헛돌곤 했다)
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying && healthyPlaybackSinceMs == 0L) healthyPlaybackSinceMs = System.currentTimeMillis()
+                if (isPlaying && !startVolumeLogged) {
+                    startVolumeLogged = true
+                    logPlaybackVolume("재생 볼륨")
+                }
                 val id = player.currentMediaItem?.mediaId ?: return
                 if (isPlaying && appliedStationId == null && !MediaIdScheme.isNas(id)) {
                     serviceScope.launch { refreshCurrentNowPlaying(initial = true) }
@@ -369,7 +383,22 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // 차량 화면의 버튼도 새로 올려야 한다. 라디오 <-> NAS 전환 시에는 버튼 자체가
             // 붙었다 떨어져야 하므로 트랙 전환도 함께 본다.
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // 항목이 바뀌면 "재생 시작" 볼륨 로그를 다시 한 번 남긴다(채널 전환·NAS 곡 전환 포함).
+                startVolumeLogged = false
                 updateCustomLayout()
+            }
+
+            // stop()/오류로 IDLE이 되면 다음 prepare/play는 새 시작이다.
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_IDLE) startVolumeLogged = false
+            }
+
+            // 오디오 세션이 바뀌면(출력 경로 변경·디코더 재생성) 세션에 묶인 LoudnessEnhancer는 죽은 이펙트가 된다.
+            // SBS 재생 중이면 새 세션에 다시 붙인다. 라디오가 아니면 applyLoudnessCompensation(null)이 해제한다.
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                val id = player.currentMediaItem?.mediaId
+                android.util.Log.i("ARMS", "오디오 세션 변경 session=$audioSessionId (media=$id)")
+                applyLoudnessCompensation(id?.takeUnless { MediaIdScheme.isNas(it) })
             }
 
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
@@ -452,7 +481,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
         carConnectionObserver = null
         carConnection = null
         serviceScope.cancel()
-        loudnessEnhancer?.release()
+        releaseLoudnessEnhancer()
         player.release()
         mediaLibrarySession.release()
         super.onDestroy()
@@ -507,33 +536,98 @@ class ARMSMediaLibraryService : MediaLibraryService() {
     // ExoPlayer의 audioSessionId는 인스턴스 생애주기 동안 보통 고정되지만, 혹시 바뀌더라도
     // 안전하게 다시 붙이도록 매번 현재 세션ID와 비교해서 필요할 때만 새로 생성한다.
     // stationId가 null이면 라디오가 아닌 재생(NAS 음악)이므로 보정을 끈다.
+    // 예외가 나면 그 인스턴스는 버린다(null) - 죽은 이펙트를 쥐고 있으면 다음 채널에서도 같은 인스턴스에
+    // setTargetGain/enabled를 걸다 계속 실패하고, SBS가 아닌 채널로 바꿔도 해제가 안 된 채 남는다.
+    // null로 두면 다음 호출(LoudnessEnhancerPolicy.RECREATE)이 새로 만든다. 규칙은 LoudnessEnhancerPolicy에.
     private fun applyLoudnessCompensation(stationId: String?) {
+        val sessionId = runCatching { player.audioSessionId }.getOrDefault(C.AUDIO_SESSION_ID_UNSET)
+        val action = LoudnessEnhancerPolicy.decide(
+            wantsBoost = stationId == sbsStationId,
+            hasEnhancer = loudnessEnhancer != null,
+            boundSessionId = loudnessEnhancerSessionId,
+            currentSessionId = sessionId,
+            unsetSessionId = C.AUDIO_SESSION_ID_UNSET
+        )
         try {
-            // SBS가 아니면 이펙트를 아예 붙이지 않는다. 오디오 세션에 이펙트가 붙으면 일부 기기에서
-            // 오프로드 경로가 빠지거나 무음이 되는 보고가 있고, 다른 채널엔 보정이 필요 없다.
-            if (stationId != sbsStationId) {
-                loudnessEnhancer?.let { runCatching { it.enabled = false; it.release() } }
-                loudnessEnhancer = null
-                loudnessEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
-                return
-            }
-            val sessionId = player.audioSessionId
-            if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
-            if (loudnessEnhancer == null || loudnessEnhancerSessionId != sessionId) {
-                loudnessEnhancer?.release()
-                loudnessEnhancer = LoudnessEnhancer(sessionId)
-                loudnessEnhancerSessionId = sessionId
+            when (action) {
+                LoudnessEnhancerPolicy.Action.SKIP -> return
+                // SBS가 아니면 이펙트를 아예 붙이지 않는다. 오디오 세션에 이펙트가 붙으면 일부 기기에서
+                // 오프로드 경로가 빠지거나 무음이 되는 보고가 있고, 다른 채널엔 보정이 필요 없다.
+                LoudnessEnhancerPolicy.Action.RELEASE -> {
+                    releaseLoudnessEnhancer()
+                    return
+                }
+                LoudnessEnhancerPolicy.Action.RECREATE -> {
+                    releaseLoudnessEnhancer()
+                    loudnessEnhancer = LoudnessEnhancer(sessionId)
+                    loudnessEnhancerSessionId = sessionId
+                }
+                LoudnessEnhancerPolicy.Action.REUSE -> Unit
             }
             val enhancer = loudnessEnhancer ?: return
-            if (stationId == sbsStationId) {
-                enhancer.setTargetGain(sbsLoudnessBoostMillibels)
-                enhancer.enabled = true
-            } else {
-                enhancer.enabled = false
-            }
+            enhancer.setTargetGain(sbsLoudnessBoostMillibels)
+            enhancer.enabled = true
         } catch (e: Exception) {
-            // 라우드니스 보정 실패는 무시하고 원본 볼륨으로 재생
+            // 라우드니스 보정 실패는 원본 볼륨으로 재생. 실패한 인스턴스는 버려 다음 호출이 새로 만들게 한다.
+            if (LoudnessEnhancerPolicy.shouldLogError(loudnessEnhancerErrorsLogged, e.javaClass.simpleName)) {
+                android.util.Log.w("ARMS", "라우드니스 보정 실패 ${e.javaClass.simpleName} (session=$sessionId, action=$action) — 이펙트 폐기", e)
+            }
+            releaseLoudnessEnhancer()
         }
+    }
+
+    private fun releaseLoudnessEnhancer() {
+        loudnessEnhancer?.let { runCatching { it.enabled = false }; runCatching { it.release() } }
+        loudnessEnhancer = null
+        loudnessEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
+    }
+
+    // 덕킹 고착 진단 로그. 재생 시작마다 한 번, 워치독이 복원할 때 한 번. adb logcat에서 "재생 볼륨"·"볼륨 배율 복원"으로 찾는다.
+    private fun logPlaybackVolume(prefix: String) {
+        android.util.Log.i(
+            "ARMS",
+            "$prefix vol=${player.volume} supp=${player.playbackSuppressionReason} le=${loudnessEnhancer?.enabled} " +
+                "session=${player.audioSessionId} media=${player.currentMediaItem?.mediaId}"
+        )
+    }
+
+    // 일시 포커스 상실(ExoPlayer가 playWhenReady를 유지한 채 소리를 억제) 또는 영구 상실 대기 중인가.
+    private fun isInAudioFocusLoss(): Boolean = DuckingRecoveryPolicy.isInFocusLoss(
+        pausedByFocusLoss = pausedByAudioFocusLoss,
+        suppressedByFocus = player.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS
+    )
+
+    // 볼륨 워치독(8초 틱). 눈에 보이는 배율(player.volume)이 1 미만으로 남아 있으면 되돌린다.
+    // 한계: Media3 AudioFocusManager의 내부 덕킹 배율(×0.2)은 player.volume에 반영되지 않아 여기서는 보이지
+    // 않는다. 그 부분은 재시작 전 stop()(stopBeforeRestart)과 2단계(자체 포커스 관리)가 맡는다. 이 워치독은
+    // "앱 배율이 어긋난 경우"만 잡고, 그 사실을 로그로 남겨 기기에서 원인을 가르는 용도가 크다.
+    private fun runVolumeWatchdog() {
+        val action = DuckingRecoveryPolicy.decide(
+            isPlaying = player.isPlaying,
+            inFocusLoss = isInAudioFocusLoss(),
+            volume = player.volume
+        )
+        if (action == DuckingRecoveryPolicy.Action.RESTORE_VOLUME) {
+            android.util.Log.w("ARMS", "볼륨 배율 복원 ${player.volume} → 1.0 (supp=${player.playbackSuppressionReason} media=${player.currentMediaItem?.mediaId})")
+            player.volume = 1f
+            logPlaybackVolume("복원 후 볼륨")
+        }
+    }
+
+    // 라디오를 (재)시작하기 직전에 부른다. IDLE이 아니면 stop()으로 IDLE을 거쳐 ExoPlayer가 오디오 포커스를
+    // abandon하게 한다 - 곧 이어지는 prepare()/play()가 포커스를 새로 요청하면서 시스템 덕킹(VolumeShaper)과
+    // Media3 내부 배율이 함께 리셋된다. 이게 없으면 알림음/TTS가 걸어둔 덕킹이 채널을 바꿔도 남는다(§2).
+    // NAS 큐 안의 곡→곡 전환은 이 경로를 타지 않는다(ExoPlayer 기본 전환, 공백 없음).
+    private fun stopBeforeRestart(reason: String, targetMediaId: String?, targetIsNas: Boolean) {
+        val shouldStop = DuckingRecoveryPolicy.shouldStopBeforeRestart(
+            isIdle = player.playbackState == Player.STATE_IDLE,
+            targetIsNas = targetIsNas,
+            targetMediaId = targetMediaId,
+            currentMediaId = player.currentMediaItem?.mediaId
+        )
+        if (!shouldStop) return
+        android.util.Log.i("ARMS", "재시작 전 stop ($reason) ${player.currentMediaItem?.mediaId} → $targetMediaId state=${player.playbackState} vol=${player.volume} supp=${player.playbackSuppressionReason}")
+        player.stop()
     }
 
     // 차량 연결 상태를 직접 관찰한다.
@@ -617,8 +711,13 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             // 라디오는 멈춰 있는 동안 버퍼가 낡는다. 그대로 재개하면 지난 구간이 흘러나오거나
             // 곧 끊기므로, 라이브 최신 지점으로 옮긴 뒤 재생한다. NAS 음악은 유한한 트랙이라
             // 멈췄던 위치 그대로 이어야 한다.
-            if (!MediaIdScheme.isNas(player.currentMediaItem?.mediaId)) {
+            val mediaId = player.currentMediaItem?.mediaId
+            if (!MediaIdScheme.isNas(mediaId)) {
+                // 포커스를 뺏은 쪽이 덕킹을 남겼을 수 있다. stop()→prepare()로 포커스를 새로 요청해 배율을 리셋한다.
+                // stop()은 큐를 지우지 않으므로 같은 항목을 그대로 다시 준비하면 된다.
+                stopBeforeRestart("포커스 상실 후 재개", mediaId, targetIsNas = false)
                 player.seekToDefaultPosition()
+                player.prepare()
             }
             player.play()
         } catch (e: Exception) {
@@ -725,7 +824,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             } else {
                 val station = stationRepository.getAllStations().first().find { it.id == mediaId } ?: return
                 // 지상파 스트림 URL은 서명 토큰이 만료되므로 quickPlayableItem이 매번 새로 받는다.
-                player.setMediaItem(quickPlayableItem(station))
+                val item = quickPlayableItem(station)
+                // 오류 뒤에는 보통 이미 IDLE이라 실제로 stop()이 불리는 일은 드물다(안전망).
+                stopBeforeRestart("오류 복구", station.id, targetIsNas = false)
+                player.setMediaItem(item)
                 player.prepare()
                 player.play()
                 scheduleImmediateRefresh()
@@ -776,6 +878,7 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             while (true) {
                 delay(nowPlayingRefreshIntervalMs)
                 try {
+                    runVolumeWatchdog()
                     refreshCurrentNowPlaying()
                 } catch (e: Exception) {
                     // 이번 주기 갱신 실패는 무시하고 다음 주기에 재시도
@@ -914,6 +1017,8 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 // 새로 서명된 URL만 받아 경량 항목으로 즉시 재생을 시작하면, 주기 갱신 루프
                 // (refreshCurrentNowPlaying)가 편성/커버를 곧 채워 넣는다.
                 val quickItem = quickPlayableItem(nextStation)
+                // 새 URL을 받은 뒤(이전 채널이 그동안 계속 들리게) stop()→교체→prepare()로 포커스를 새로 잡는다.
+                stopBeforeRestart("채널 전환", nextStation.id, targetIsNas = false)
                 player.setMediaItem(quickItem)
                 player.prepare()
                 player.play()
@@ -1135,6 +1240,9 @@ class ARMSMediaLibraryService : MediaLibraryService() {
             val station = allStations.find { it.id == lastStationId } ?: allStations.firstOrNull()
             val items = station?.let {
                 val item = withTimeoutOrNull(6000L) { quickPlayableItem(it) } ?: createPlayableItem(it)
+                // 프레임워크는 큐가 빌 때 이 콜백을 부르므로 보통 IDLE이지만, 아니라면 돌려준 항목을
+                // setMediaItems/prepare/play하기 전에 포커스를 놓게 해 덕킹을 리셋한다.
+                stopBeforeRestart("재개(onPlaybackResumption)", it.id, targetIsNas = false)
                 scheduleImmediateRefresh()
                 ImmutableList.of(item)
             } ?: ImmutableList.of()
@@ -1215,6 +1323,10 @@ class ARMSMediaLibraryService : MediaLibraryService() {
                 extraPositionMs = extras?.takeIf { it.containsKey(SessionAudioPlayer.EXTRA_START_POSITION_MS) }?.getLong(SessionAudioPlayer.EXTRA_START_POSITION_MS),
                 queueSize = resolved.size
             )
+            // 컨트롤러(폰 화면·차량)는 이 결과로 setMediaItems→prepare→play를 이어 부른다(SessionAudioPlayer 참고).
+            // 그 전에 포커스를 놓아 덕킹을 리셋한다. 라디오는 항상, NAS는 다른 항목으로 바뀔 때만(같은 큐 재요청 제외).
+            val target = resolved.getOrNull(index)
+            stopBeforeRestart("재생 요청(onSetMediaItems)", target?.mediaId, targetIsNas = MediaIdScheme.isNas(target?.mediaId))
             MediaSession.MediaItemsWithStartPosition(ImmutableList.copyOf(resolved), index, position)
         }
 

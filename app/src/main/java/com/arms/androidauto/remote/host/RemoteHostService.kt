@@ -110,6 +110,13 @@ class RemoteHostService : Service() {
 
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
+    // 세션 재연결(2026-10-12 §1: 세션이 끊기면 Media3가 컨트롤러를 release → 명령은 무시되는데 200을 줬다).
+    private var controllerReconnectJob: Job? = null
+    private var controllerAttempt = 0
+
+    // 벽걸이 모드 락(로컬 제어 켜짐 + 충전 중). HostPowerPolicy.
+    private var powerLocks: HostPowerLocks? = null
+    private var charging = false
 
     private lateinit var stationRepository: StationRepository
     private lateinit var monitor: BluetoothOutputMonitor
@@ -224,10 +231,14 @@ class RemoteHostService : Service() {
             }
             networkCallback = null
             monitor.stop()
+            powerLocks?.release()
+            powerLocks = null
+            controllerReconnectJob?.cancel()
+            controllerReconnectJob = null
             controller?.removeListener(playerListener)
             controller?.release()
             controller = null
-            controllerFuture?.let { f -> if (!f.isDone) f.cancel(false) }
+            controllerFuture?.let { f -> if (!f.isDone) MediaController.releaseFuture(f) }
             controllerFuture = null
             val ch = channel
             val tr = transport
@@ -311,21 +322,96 @@ class RemoteHostService : Service() {
 
     // ---- 세션 연결 ----
 
+    // 세션이 끊기면(서비스 종료·프로세스 정리) Media3가 컨트롤러를 자동 release 한다. 그 뒤의 명령은
+    // "not connected. Ignoring"으로 무시되므로 바로 버리고 백오프 재연결에 들어간다.
+    private val controllerListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            scope.launch { onControllerDisconnected(controller) }
+        }
+    }
+
+    private fun onControllerDisconnected(c: MediaController) {
+        if (!running) return
+        if (controller === c) controller = null
+        runCatching { c.removeListener(playerListener) }
+        runCatching { c.release() }
+        Log.w("ARMS", "리모컨 호스트: 미디어 세션 끊김 → 재연결")
+        scheduleControllerReconnect()
+        // 게스트·스마트싱스에 "세션 없음" 상태(정지)를 바로 알린다.
+        requestPublish(forced = true)
+    }
+
+    // 연결 시도 하나. 이미 시도 중이면(future 미완) 아무것도 하지 않는다. 실패·타임아웃이면 백오프 뒤 다시.
     private fun connectController() {
+        if (!running || controller != null) return
+        controllerFuture?.let { if (!it.isDone) return }
         val token = SessionToken(this, ComponentName(this, ARMSMediaLibraryService::class.java))
-        val future = MediaController.Builder(this, token).buildAsync()
+        val future = MediaController.Builder(this, token).setListener(controllerListener).buildAsync()
         controllerFuture = future
+        val watchdog = scope.launch {
+            delay(ControllerReconnectPolicy.CONNECT_TIMEOUT_MS)
+            if (controllerFuture === future && !future.isDone) {
+                Log.w("ARMS", "리모컨 호스트: 미디어 세션 연결 응답 없음 (${ControllerReconnectPolicy.CONNECT_TIMEOUT_MS / 1000}s) → 다시 시도")
+                MediaController.releaseFuture(future)
+            }
+        }
         future.addListener({
+            watchdog.cancel()
             if (!running) { runCatching { future.get().release() }; return@addListener }
             val c = runCatching { future.get() }.getOrElse {
-                Log.w("ARMS", "리모컨 호스트: 미디어 세션 연결 실패 ${it.javaClass.simpleName}")
+                scope.launch {
+                    if (controllerFuture === future) controllerFuture = null
+                    Log.w("ARMS", "리모컨 호스트: 미디어 세션 연결 실패 ${it.javaClass.simpleName}")
+                    scheduleControllerReconnect()
+                }
                 return@addListener
             }
-            c.addListener(playerListener)
-            controller = c
-            Log.i("ARMS", "리모컨 호스트: 미디어 세션 연결")
-            requestPublish()
+            scope.launch {
+                if (!running || controller != null) { runCatching { c.release() }; return@launch }
+                controllerAttempt = 0
+                controllerReconnectJob?.cancel()
+                controllerReconnectJob = null
+                c.addListener(playerListener)
+                controller = c
+                Log.i("ARMS", "리모컨 호스트: 미디어 세션 연결")
+                requestPublish(forced = true)
+            }
         }, MoreExecutors.directExecutor())
+    }
+
+    // 2→5→10→30s 뒤 다시 연결. 서비스가 사는 동안 끝없이.
+    private fun scheduleControllerReconnect() {
+        if (!running || controller != null) return
+        controllerReconnectJob?.cancel()
+        controllerAttempt++
+        val delayMs = ControllerReconnectPolicy.delayMs(controllerAttempt)
+        Log.i("ARMS", "리모컨 호스트: 미디어 세션 ${delayMs / 1000}s 후 재연결 (시도 $controllerAttempt)")
+        controllerReconnectJob = scope.launch {
+            delay(delayMs)
+            controllerReconnectJob = null
+            connectController()
+        }
+    }
+
+    // 명령이 왔는데 세션이 없을 때: 남은 백오프를 건너뛰고 바로 한 번 시도한다(이미 시도 중이면 그대로 둔다).
+    private fun reconnectControllerNow() {
+        if (!running || controller != null) return
+        controllerFuture?.let { if (!it.isDone) return }
+        controllerReconnectJob?.cancel()
+        controllerReconnectJob = null
+        connectController()
+    }
+
+    // 명령 실행에 쓸 컨트롤러. 없거나 끊겼으면 null을 주고 즉시 재연결을 건다(호출자는 503/거부).
+    private fun sessionController(): MediaController? {
+        val c = controller
+        if (c != null && c.isConnected) return c
+        if (c != null) {
+            // release는 됐는데 onDisconnected가 아직 안 온 틈(또는 안 오는 경우)
+            onControllerDisconnected(c)
+        }
+        reconnectControllerNow()
+        return null
     }
 
     // ---- 브로커 채널(감독 루프) ----
@@ -540,12 +626,44 @@ class RemoteHostService : Service() {
         scope.launch { monitor.status.collect { requestPublish() } }
     }
 
+    // 배터리 %는 publish 지문에 들어간다. 충전 여부는 벽걸이 모드 락(HostPowerPolicy)을 정한다.
+    // ACTION_BATTERY_CHANGED는 sticky라 등록 직후 현재 값이 한 번 온다; 꽂고 뽑는 순간은 POWER_(DIS)CONNECTED가 더 빠르다.
     private fun registerBatteryReceiver() {
         val r = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) { requestPublish() }
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    Intent.ACTION_BATTERY_CHANGED -> {
+                        setCharging(HostPowerPolicy.isCharging(intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)))
+                        requestPublish()
+                    }
+                    Intent.ACTION_POWER_CONNECTED -> setCharging(true)
+                    Intent.ACTION_POWER_DISCONNECTED -> setCharging(false)
+                }
+            }
         }
-        ContextCompat.registerReceiver(this, r, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED).apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(this, r, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         batteryReceiver = r
+    }
+
+    private fun setCharging(on: Boolean) {
+        if (charging == on) return
+        charging = on
+        updatePowerLocks()
+    }
+
+    // 로컬 제어 켜짐 + 충전 중이면 잡고, 아니면 푼다. main에서만.
+    private fun updatePowerLocks() {
+        if (!running) return
+        val hold = HostPowerPolicy.shouldHoldLocks(localEnabled = LocalControl.enabled.value, charging = charging)
+        if (hold) {
+            (powerLocks ?: HostPowerLocks(this).also { powerLocks = it }).acquire()
+        } else {
+            powerLocks?.release()
+        }
     }
 
     // 미디어 볼륨이 바뀌면(하드웨어 키·시스템 UI·게스트 Volume 명령) 게스트 슬라이더가 따라오게 publish.
@@ -742,7 +860,14 @@ class RemoteHostService : Service() {
             false to (t.message ?: t.javaClass.simpleName)
         }
         ack(msg.seq, ok, message)
-        if (cmd is RemoteCommand.Refresh) requestPublish(forced = true) else requestPublish()
+        // 성공한 명령 뒤에는 바뀐 게 없어 보여도 상태를 한 번 확정 publish 한다(게스트의 낙관 반영을 실제 상태로 덮는다).
+        if (ok) publishAfterCommand() else requestPublish()
+    }
+
+    // 명령 성공 뒤: 로컬(SSE) 상태를 무조건 한 번, MQTT 상태를 강제로 한 번.
+    private fun publishAfterCommand() {
+        pushLocalStateNow()
+        requestPublish(forced = true)
     }
 
     // Bye에는 이름이 없다(프로토콜). 페어링 1회 = 게스트 1대(플랜 §5)이므로 붙어 있는 게스트가 하나면
@@ -752,7 +877,7 @@ class RemoteHostService : Service() {
     private suspend fun execute(cmd: RemoteCommand): Pair<Boolean, String?> {
         if (cmd is RemoteCommand.Refresh) return true to null
         if (cmd is RemoteCommand.Volume) return setVolume(cmd.percent)
-        val c = controller ?: return false to NO_SESSION
+        val c = sessionController() ?: return false to NO_SESSION
         return when (cmd) {
             RemoteCommand.Play -> play(c)
             RemoteCommand.Pause -> { c.pause(); true to null }
@@ -764,19 +889,26 @@ class RemoteHostService : Service() {
         }
     }
 
+    // ResumePolicy: 큐가 비었으면 마지막 채널, IDLE(정지·오류 뒤)의 라디오는 같은 mediaId를 다시 넣어
+    // 서비스가 서명 스트림 URL을 새로 받게 한다(만료된 URL로 prepare 하면 다시 오류). NAS는 prepare+play로 이어서.
     private suspend fun play(c: MediaController): Pair<Boolean, String?> {
-        if (c.mediaItemCount == 0) {
-            // 큐가 비어 있으면(앱 재시작 직후) 마지막 채널부터. 서비스가 mediaId를 해석한다.
-            val last = withContext(Dispatchers.IO) { runCatching { stationRepository.getLastPlayedStationId() }.getOrNull() }
-                ?: stations.firstOrNull()?.id
-                ?: return false to "재생할 항목 없음"
-            c.setMediaItem(MediaItem.Builder().setMediaId(last).build())
-            c.prepare(); c.play()
-            return true to null
+        when (val action = ResumePolicy.decide(c.mediaItemCount > 0, c.playbackState, c.currentMediaItem?.mediaId)) {
+            ResumePolicy.Action.ReplaceWithLast -> {
+                // 서비스가 mediaId를 해석한다(onAddMediaItems).
+                val last = withContext(Dispatchers.IO) { runCatching { stationRepository.getLastPlayedStationId() }.getOrNull() }
+                    ?: stations.firstOrNull()?.id
+                    ?: return false to "재생할 항목 없음"
+                c.setMediaItem(MediaItem.Builder().setMediaId(last).build())
+                c.prepare(); c.play()
+            }
+            is ResumePolicy.Action.Restart -> {
+                c.setMediaItem(MediaItem.Builder().setMediaId(action.mediaId).build())
+                c.prepare(); c.play()
+            }
+            // 외부 STOP으로 IDLE이 된 뒤에는 prepare()가 있어야 다시 재생된다(SessionAudioPlayer.resume과 동일).
+            ResumePolicy.Action.PrepareAndPlay -> { c.prepare(); c.play() }
+            ResumePolicy.Action.Play -> c.play()
         }
-        // 외부 STOP으로 IDLE이 된 뒤에는 prepare()가 있어야 다시 재생된다(SessionAudioPlayer.resume과 동일).
-        if (c.playbackState == Player.STATE_IDLE) c.prepare()
-        c.play()
         return true to null
     }
 
@@ -821,6 +953,7 @@ class RemoteHostService : Service() {
                 } else {
                     host.stop()
                 }
+                updatePowerLocks()
             }
         }
         // 연결 허용 창이 열리거나 닫히면(태블릿 UI·폰 st_pair·첫 페어링·끄기) 게스트에게 알린다.
@@ -860,8 +993,18 @@ class RemoteHostService : Service() {
             localDebounceJob = launch {
                 delay(LOCAL_DEBOUNCE_MS)
                 val next = buildLocalState()
-                if (!next.sameContentAs(localState.value)) localState.value = next
+                if (!next.sameContentAs(localState.value)) localState.value = next.copy(forceSeq = localState.value.forceSeq)
             }
+        }
+    }
+
+    // 명령 성공 직후: 디바운스·내용 비교 없이 지금 상태를 한 번 내보낸다(forceSeq를 올려 SSE가 같은 내용도 보낸다).
+    private fun pushLocalStateNow() {
+        if (!running || localHost?.isStarted != true) return
+        scope.launch {
+            localDebounceJob?.cancel()
+            localDebounceJob = null
+            localState.update { prev -> buildLocalState().copy(forceSeq = prev.forceSeq + 1) }
         }
     }
 
@@ -869,7 +1012,9 @@ class RemoteHostService : Service() {
         override val states: StateFlow<LocalState> = localState.asStateFlow()
 
         override suspend fun currentState(): LocalState = withContext(Dispatchers.Main.immediate) {
-            buildLocalState().also { if (!it.sameContentAs(localState.value)) localState.value = it }
+            val next = buildLocalState().copy(forceSeq = localState.value.forceSeq)
+            if (!next.sameContentAs(localState.value)) localState.value = next
+            next
         }
 
         override fun deviceInfo(): DeviceInfo = DeviceInfo(
@@ -881,7 +1026,7 @@ class RemoteHostService : Service() {
 
         override suspend fun execute(command: LocalCommand): CommandOutcome = withContext(Dispatchers.Main.immediate) {
             val outcome = executeLocal(command)
-            requestPublish()
+            if (outcome.ok) publishAfterCommand() else requestPublish()
             outcome
         }
 
@@ -899,16 +1044,15 @@ class RemoteHostService : Service() {
     private var localDeviceId: String = ""
 
     // 로컬 명령 → MQTT와 같은 실행 경로(execute/play/select/setVolume). main에서 부른다.
+    // 모든 명령에 앞서 세션 연결을 확인한다(SessionGate): 없거나 끊겼으면 503 + 즉시 재연결. 200은 "세션이 받았다"를 뜻한다.
     private suspend fun executeLocal(cmd: LocalCommand): CommandOutcome {
         fun of(r: Pair<Boolean, String?>): CommandOutcome =
             if (r.first) CommandOutcome.OK
             else if (r.second == NO_SESSION) CommandOutcome.unavailable(NO_SESSION)
             else CommandOutcome.failed(r.second ?: "실패")
+        val c = sessionController() ?: return SessionGate.outcome(connected = null)!!
         return when (cmd) {
-            LocalCommand.On -> {
-                val c = controller ?: return CommandOutcome.unavailable(NO_SESSION)
-                if (c.isPlaying) CommandOutcome.OK else of(play(c))
-            }
+            LocalCommand.On -> if (c.isPlaying) CommandOutcome.OK else of(play(c))
             // 라디오(플레이어)만 멈춘다. 화면·다른 기능은 건드리지 않는다.
             LocalCommand.Off -> of(execute(RemoteCommand.Stop))
             LocalCommand.Play -> of(execute(RemoteCommand.Play))
@@ -956,7 +1100,7 @@ class RemoteHostService : Service() {
         // 음소거 변경(시스템 보호 브로드캐스트, 공개 상수 없음)
         private const val STREAM_MUTE_CHANGED_ACTION = "android.media.STREAM_MUTE_CHANGED_ACTION"
         private const val LOCAL_DEBOUNCE_MS = 200L
-        private const val NO_SESSION = "미디어 세션에 연결되지 않음"
+        private const val NO_SESSION = SessionGate.CONNECTING_MESSAGE
         private const val ST_DISABLED_MESSAGE = "스마트싱스 연결이 꺼져 있습니다"
         // 창 만료 뒤 publish를 깨우는 여유(단조 시계·디바운스 오차).
         private const val PAIRING_EXPIRY_SLACK_MS = 250L

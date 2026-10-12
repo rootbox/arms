@@ -72,27 +72,31 @@ local function map_presets(list)
   return out
 end
 
+--- audioTrackData value, or nil when there is no title: the capability schema requires
+--- `title`, and the hub rejects the event ("Required field missing: title"). A state without
+--- a title (idle host, stream metadata not yet received) therefore emits no track event and
+--- the app keeps showing the last known track.
 local function map_track(state)
-  local track = {}
   local title = nonempty_string(state.title)
+  if title == nil or title:match("^%s*$") then return nil end
+  local track = { title = title }
   local artist = nonempty_string(state.artist)
   local art = nonempty_string(state.albumArtUrl)
-  if title then track.title = title end
   if artist then track.artist = artist end
   if art then track.albumArtUrl = art end
   return track
 end
+M.map_track = map_track
 
 --- Convert a host state table into { [key] = value } for the attributes it describes.
 ---
---- @param state table decoded state JSON
---- @param opts table|nil { partial = true } for optimistic patches: absent fields are left
----                     untouched instead of being cleared (track data).
+--- @param state table decoded state JSON (full state or an optimistic partial patch; absent
+---              fields are never cleared, so a partial patch only touches what it names)
+--- @param opts table|nil accepted for symmetry with events_for_state; unused here
 --- @return table values keyed like M.ORDER[i].key
 function M.normalize(state, opts)
   local values = {}
   if type(state) ~= "table" then return values end
-  local partial = opts and opts.partial
 
   if state.power == "on" or state.power == "off" then
     values["switch.switch"] = state.power
@@ -112,9 +116,8 @@ function M.normalize(state, opts)
   local presets = map_presets(state.presets)
   if presets then values["mediaPresets.presets"] = presets end
 
-  if not partial or state.title ~= nil or state.artist ~= nil or state.albumArtUrl ~= nil then
-    values["audioTrackData.audioTrackData"] = map_track(state)
-  end
+  local track = map_track(state)
+  if track then values["audioTrackData.audioTrackData"] = track end
 
   -- Not part of contract v1 (live radio has no duration). Only reported if a future host
   -- version sends a positive durationMs, so on-demand content could show progress.
@@ -152,13 +155,16 @@ end
 ---
 --- @param snapshot table last emitted values (mutated)
 --- @param values table output of M.normalize
---- @param force boolean|nil emit every known value even if unchanged (refresh)
+--- @param force boolean|table|nil true: emit every known value even if unchanged (refresh);
+---              a set { [key] = true }: emit those keys even if unchanged (command verification)
 --- @return table list of { key, capability, attribute, value }
 function M.diff(snapshot, values, force)
   local events = {}
+  local force_all = force == true
+  local force_keys = type(force) == "table" and force or {}
   for _, spec in ipairs(M.ORDER) do
     local v = values[spec.key]
-    if v ~= nil and (force or not deep_equal(snapshot[spec.key], v)) then
+    if v ~= nil and (force_all or force_keys[spec.key] or not deep_equal(snapshot[spec.key], v)) then
       snapshot[spec.key] = copy(v)
       events[#events + 1] = {
         key = spec.key,
@@ -172,8 +178,18 @@ function M.diff(snapshot, values, force)
 end
 
 --- Convenience: normalize + diff.
+--- @param opts table|nil { partial = bool, force = true|{ [key] = true } }
 function M.events_for_state(snapshot, state, opts)
   return M.diff(snapshot, M.normalize(state, opts), opts and opts.force)
+end
+
+--- Descriptors that re-emit every value currently in `snapshot` (last known state), e.g. to
+--- take the app out of a pending state when the host cannot be asked for a fresh one.
+--- @return table list of { key, capability, attribute, value }
+function M.snapshot_events(snapshot)
+  local values = {}
+  for k, v in pairs(snapshot) do values[k] = v end
+  return M.diff(snapshot, values, true)
 end
 
 return M

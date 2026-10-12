@@ -93,9 +93,67 @@ t.test("muted true -> muted", function()
   t.eq(sm.normalize({ muted = true })["audioMute.mute"], "muted")
 end)
 
-t.test("partial state leaves track data alone; full state without track clears it", function()
+t.test("partial state leaves track data alone", function()
   t.is_nil(sm.normalize({ volume = 3 }, { partial = true })["audioTrackData.audioTrackData"])
-  t.eq(sm.normalize({ power = "off", playback = "stopped" })["audioTrackData.audioTrackData"], {})
+end)
+
+t.test("track without a title is omitted (hub rejects audioTrackData without title)", function()
+  -- full state, no title at all
+  t.is_nil(sm.normalize({ power = "off", playback = "stopped" })["audioTrackData.audioTrackData"])
+  -- blank / whitespace titles count as missing, even with artist or art present
+  for _, title in ipairs({ "", "   ", "\t" }) do
+    t.is_nil(sm.normalize({ title = title, artist = "A", albumArtUrl = "http://x/1.png" })
+      ["audioTrackData.audioTrackData"], string.format("title=%q", title))
+  end
+  t.is_nil(sm.normalize({ artist = "A" })["audioTrackData.audioTrackData"])
+  t.is_nil(sm.map_track({ artist = "A" }))
+  -- a real title is emitted and always carries `title`
+  t.eq(sm.normalize({ title = "KBS", albumArtUrl = "http://x/1.png" })["audioTrackData.audioTrackData"],
+    { title = "KBS", albumArtUrl = "http://x/1.png" })
+  -- and no event is produced for the track, even on a forced refresh
+  local snap = {}
+  local evs = sm.events_for_state(snap, { power = "on", playback = "playing" }, { force = true })
+  t.eq(#evs, 2)
+  t.is_nil(by_key(evs)["audioTrackData.audioTrackData"])
+  t.is_nil(snap["audioTrackData.audioTrackData"])
+  -- the previously emitted track stays in the snapshot (app keeps showing it)
+  snap = {}
+  sm.events_for_state(snap, FULL)
+  t.eq(#sm.events_for_state(snap, { power = "on", playback = "playing" }), 0)
+  t.eq(snap["audioTrackData.audioTrackData"].title, FULL.title)
+end)
+
+t.test("force as a key set re-emits only those keys even if unchanged", function()
+  local snap = {}
+  sm.events_for_state(snap, FULL)
+  local evs = sm.events_for_state(snap, FULL, { force = { ["switch.switch"] = true } })
+  t.eq(#evs, 1)
+  t.eq(evs[1].key, "switch.switch")
+  t.eq(evs[1].value, "on")
+  -- a changed attribute outside the set is still emitted
+  local changed = {}
+  for k, v in pairs(FULL) do changed[k] = v end
+  changed.volume = 42
+  evs = sm.events_for_state(snap, changed, { force = { ["switch.switch"] = true } })
+  t.eq(#evs, 2)
+  t.eq(evs[1].key, "switch.switch")
+  t.eq(evs[2].key, "audioVolume.volume")
+  -- a forced key absent from the state is not invented
+  evs = sm.events_for_state(snap, { volume = 42 }, { force = { ["switch.switch"] = true } })
+  t.eq(#evs, 0)
+end)
+
+t.test("snapshot_events re-emits everything last emitted, in ORDER", function()
+  local snap = {}
+  sm.events_for_state(snap, FULL)
+  local evs = sm.snapshot_events(snap)
+  t.eq(#evs, 6)
+  t.eq(evs[1].key, "switch.switch")
+  t.eq(evs[6].key, "audioTrackData.audioTrackData")
+  t.eq(evs[6].value.title, FULL.title)
+  t.eq(#sm.snapshot_events({}), 0)
+  -- the snapshot is unchanged afterwards (dedupe keeps working)
+  t.eq(#sm.events_for_state(snap, FULL), 0)
 end)
 
 t.test("presets: numeric ids stringified, missing name -> id, entries without id skipped", function()
