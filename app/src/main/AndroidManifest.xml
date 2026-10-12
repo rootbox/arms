@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 벽걸이 호스트: 충전 중일 때 Wi-Fi 절전으로 허브 명령이 끊기지 않게 유지 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 재생을 멈추고 한동안 방치하면 시스템이 앱을 낮은 standby bucket으로 강등시켜,
          Android Auto가 백그라운드에서 MediaLibraryService를 다시 바인딩하지 못하고
          차량 미디어 소스 목록에서 사라지는 문제가 있었다. 배터리 최적화 제외를 요청해
